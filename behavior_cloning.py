@@ -42,7 +42,7 @@ class BehaviorCloning(object):
                                           weight_decay=weight_decay)
 
   def __call__(self, states, actions):
-    dist, _ = self.actor.get_dist_and_mode(states)
+    dist, _ = self.actor.get_dist_and_mode(states, batch_size=4000)
     actions = tf.clip_by_value(actions, 1e-4 + self.action_spec.low,
                                -1e-4 + self.action_spec.high)
     log_probs = dist.log_prob(actions)

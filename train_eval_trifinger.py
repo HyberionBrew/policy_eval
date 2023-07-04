@@ -24,7 +24,7 @@ from absl import flags
 from absl import logging
 # import d4rl  # pylint: disable=unused-import
 import gymnasium as gym
-import trifinger_rl_datasets
+#import trifinger_rl_datasets
 from gym.wrappers import time_limit
 import numpy as np
 import tensorflow as tf
@@ -65,7 +65,7 @@ flags.DEFINE_float('weight_decay', 1e-5, 'Weight decay.')
 flags.DEFINE_float('behavior_policy_std', None,
                    'Noise scale of behavior policy.')
 flags.DEFINE_float('target_policy_std', 0.1, 'Noise scale of target policy.')
-flags.DEFINE_bool('taget_policy_noisy', False)
+flags.DEFINE_bool('target_policy_noisy', False, 'inject noise into the actions of the target policy')
 flags.DEFINE_integer('num_trajectories', 1000, 'Number of trajectories.')
 flags.DEFINE_integer('sample_batch_size', 256, 'Batch size.')
 flags.DEFINE_integer(
@@ -109,6 +109,26 @@ def main(_):
   # assert not FLAGS.d4rl and FlAGS.trifinger
   assert(not FLAGS.d4rl or not FLAGS.trifinger)
   # import trifinger
+  # set the maximum used gpu memory
+  
+  gpu_memory = 12209 # GPU memory available on the machine
+  # 20% of the memory, this way we can for sure launch 4 in parallel
+  allowed_gpu_memory = gpu_memory * 0.2 
+  
+  gpus = tf.config.experimental.list_physical_devices('GPU')
+  if gpus:
+    try:
+      # Restrict TensorFlow to only allocate 20% of the memory on the first GPU
+      tf.config.experimental.set_virtual_device_configuration(
+          gpus[0],
+          [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=(allowed_gpu_memory))])
+      logical_gpus = tf.config.experimental.list_logical_devices('GPU')
+      print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+    except RuntimeError as e:
+      # Virtual devices must be set before GPUs have been initialized
+      print(e, " GPUs must be set at program startup")
+
+
 
   module_path = os.path.abspath(os.path.join('/app/ws/trifinger_rl_datasets')) # or the path to your source code
   sys.path.insert(0, module_path)
@@ -122,7 +142,7 @@ def main(_):
   hparam_str = make_hparam_string(
       seed=FLAGS.seed, env_name=FLAGS.env_name, algo=FLAGS.algo,
       trifinger_policy_class=FLAGS.trifinger_policy_class, 
-      std=FLAGS.target_policy_std, time=time, tagret_policy_noisy=FLAGS.taget_policy_noisy)
+      std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
       os.path.join(FLAGS.save_dir, 'tb', hparam_str))
   summary_writer.set_as_default()
@@ -145,8 +165,9 @@ def main(_):
         bootstrap=FLAGS.bootstrap)
   
   elif FLAGS.trifinger:
+    import trifinger_rl_datasets
     trifinger_env = utils.TrifingerWrapper(
-        "trifinger-cube-push-sim-mixed-v0",
+        FLAGS.env_name,
         set_terminals=True,
         flatten_obs=True,
         image_obs=False,
@@ -165,7 +186,7 @@ def main(_):
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
-        debug=True)
+        debug=False)
     print("Finished loading Trifinger Dataset")
 
   else:
@@ -198,7 +219,7 @@ def main(_):
     Policy = load_policy_class(FLAGS.trifinger_policy_class)
     policy_config = Policy.get_policy_config()
     policy = Policy(env.action_space, env.observation_space, env.sim_env.episode_length)
-    actor = utils.TrifingerActor(policy, FLAGS.target_policy_std)
+    actor = utils.TrifingerActor(policy, std=FLAGS.target_policy_std, noisy=FLAGS.target_policy_noisy)
   else:
     actor = Actor(env.observation_spec().shape[0], env.action_spec())
     actor.load_weights(behavior_dataset.model_filename)
@@ -243,7 +264,7 @@ def main(_):
     states_unnorm = states_unnorm.numpy()
     actions = actor(
         states_unnorm,
-        std=FLAGS.target_policy_std, noisy=FLAGS.target_policy_noisy)[1]
+        std=FLAGS.target_policy_std)[1]
     # convert actions to tf
     #print(actions.shape)
     actions = tf.convert_to_tensor(actions)
@@ -251,6 +272,7 @@ def main(_):
 
   #@tf.function
   def get_target_logprobs(states, actions):
+    # need to run this as a batch operation
     states_unnorm = behavior_dataset.unnormalize_states(states)
     # to numpy
     states_unnorm = states_unnorm.numpy()

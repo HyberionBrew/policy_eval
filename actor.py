@@ -57,7 +57,8 @@ class Actor(tf.keras.Model):
   def get_dist_and_mode(
       self,
       states,
-      std = None
+      std = None,
+      batch_size = None,
   ):
     """Returns a tf.Distribution for given states modes of this distribution.
 
@@ -65,13 +66,35 @@ class Actor(tf.keras.Model):
       states: A batch of states.
       std: A fixed std to use, if not provided use from the network.
     """
-    out = self.trunk(states)
-    mu, log_std = tf.split(out, num_or_size_splits=2, axis=1)
-    mode = tf.nn.tanh(mu)
+    # do in batches
+    if batch_size is None:
+      batch_size = states.shape[0]
+    num_batches = (states.shape[0]) // batch_size
+    mus = []
+    log_stds = []
+    modes = []
+    for i in range(num_batches):
+      # compute batch_states, but guard for the last batch
+      # check if last batch
+      if i == num_batches - 1:
+        batch_states = states[i * batch_size:]
+      else:
+        batch_states = states[i * batch_size: (i + 1) * batch_size]
+      out = self.trunk(batch_states)
+      mu, log_std = tf.split(out, num_or_size_splits=2, axis=1)
+      print(mu.shape, log_std.shape)
+      mode = tf.nn.tanh(mu)
 
-    log_std = tf.nn.tanh(log_std)
-    log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+      log_std = tf.nn.tanh(log_std)
+      log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+      
+      log_stds.append(log_std)
+      mus.append(mu)
+      modes.append(mode)
 
+    log_std = tf.concat(log_stds, axis=0)
+    mu = tf.concat(mus, axis=0)
+    mode = tf.concat(modes, axis=0)
     if std is None:
       std = tf.exp(log_std)
     else:

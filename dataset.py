@@ -169,9 +169,10 @@ class Dataset(object):
   def with_uniform_sampling(self, sample_batch_size):
     return tf.data.Dataset.from_tensor_slices(
         (self.states, self.actions, self.next_states, self.rewards, self.masks,
-         self.weights, self.steps)).repeat().shuffle(
-             self.states.shape[0], reshuffle_each_iteration=True).batch(
-                 sample_batch_size, drop_remainder=True).prefetch(100)
+        self.weights, self.steps)).repeat().shuffle(
+            self.states.shape[0], reshuffle_each_iteration=True).batch(
+                sample_batch_size, drop_remainder=True).apply(
+      tf.data.experimental.copy_to_device("/gpu:0")).prefetch(tf.data.AUTOTUNE)
 
   def with_geometric_sampling(self, sample_batch_size,
                               discount):
@@ -200,7 +201,7 @@ class Dataset(object):
                         0), tf.gather(self.weights, ind, 0),
               tf.gather(self.steps, ind, 0))
 
-    return tf.data.experimental.Counter().map(sample_batch).prefetch(100)
+    return tf.data.experimental.Counter().map(sample_batch).prefetch(tf.data.AUTOTUNE)
 
 
 class D4rlDataset(Dataset):
@@ -225,115 +226,132 @@ class D4rlDataset(Dataset):
       noise_scale: Data augmentation noise scale.
       bootstrap: Whether to generated bootstrapped weights.
     """
-    dataset = dict(
-        trajectories=dict(
-            states=[],
-            actions=[],
-            next_states=[],
-            rewards=[],
-            masks=[]))
-    d4rl_dataset = d4rl_env.get_dataset()
-    dataset_length = len(d4rl_dataset['actions'])
-    new_trajectory = True
-    for idx in range(dataset_length):
-      if new_trajectory:
-        trajectory = dict(
-            states=[], actions=[], next_states=[], rewards=[], masks=[])
+    with tf.device('cpu:0'):
+      dataset = dict(
+          trajectories=dict(
+              states=[],
+              actions=[],
+              next_states=[],
+              rewards=[],
+              masks=[]))
+      d4rl_dataset = d4rl_env.get_dataset()
+      dataset_length = len(d4rl_dataset['actions'])
+      new_trajectory = True
+      for idx in range(dataset_length):
+        if new_trajectory:
+          trajectory = dict(
+              states=[], actions=[], next_states=[], rewards=[], masks=[])
 
-      trajectory['states'].append(d4rl_dataset['observations'][idx])
-      trajectory['actions'].append(d4rl_dataset['actions'][idx])
-      trajectory['rewards'].append(d4rl_dataset['rewards'][idx])
-      trajectory['masks'].append(1.0 - d4rl_dataset['terminals'][idx])
-      if not new_trajectory:
-        trajectory['next_states'].append(d4rl_dataset['observations'][idx])
+        trajectory['states'].append(d4rl_dataset['observations'][idx])
+        trajectory['actions'].append(d4rl_dataset['actions'][idx])
+        trajectory['rewards'].append(d4rl_dataset['rewards'][idx])
+        trajectory['masks'].append(1.0 - d4rl_dataset['terminals'][idx])
+        if not new_trajectory:
+          trajectory['next_states'].append(d4rl_dataset['observations'][idx])
 
-      end_trajectory = (d4rl_dataset['terminals'][idx] or
-                        d4rl_dataset['timeouts'][idx])
-      if end_trajectory:
-        trajectory['next_states'].append(d4rl_dataset['observations'][idx])
-        if d4rl_dataset['timeouts'][idx] and not d4rl_dataset['terminals'][idx]:
-          for key in trajectory:
-            del trajectory[key][-1]
-        if trajectory['actions']:
-          for k, v in trajectory.items():
-            assert len(v) == len(trajectory['actions'])
-            dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
-          print('Added trajectory %d with length %d.' % (
-              len(dataset['trajectories']['actions']),
-              len(trajectory['actions'])))
-          if debug:
-            break
-      new_trajectory = end_trajectory
+        end_trajectory = (d4rl_dataset['terminals'][idx] or
+                          d4rl_dataset['timeouts'][idx])
+        if end_trajectory:
+          trajectory['next_states'].append(d4rl_dataset['observations'][idx])
+          if d4rl_dataset['timeouts'][idx] and not d4rl_dataset['terminals'][idx]:
+            for key in trajectory:
+              del trajectory[key][-1]
+          if trajectory['actions']:
+            for k, v in trajectory.items():
+              assert len(v) == len(trajectory['actions'])
+              dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
+            print('Added trajectory %d with length %d.' % (
+                len(dataset['trajectories']['actions']),
+                len(trajectory['actions'])))
+            if debug:
+              break
+        new_trajectory = end_trajectory
 
-    if noise_scale > 0.0:
-      dataset['trajectories'] = augment_data(dataset['trajectories'],  # pytype: disable=wrong-arg-types  # dict-kwargs
-                                             noise_scale)
+      if noise_scale > 0.0:
+        dataset['trajectories'] = augment_data(dataset['trajectories'],  # pytype: disable=wrong-arg-types  # dict-kwargs
+                                              noise_scale)
 
-    dataset['trajectories']['steps'] = [
-        np.arange(len(state_trajectory))
-        for state_trajectory in dataset['trajectories']['states']
-    ]
+      dataset['trajectories']['steps'] = [
+          np.arange(len(state_trajectory))
+          for state_trajectory in dataset['trajectories']['states']
+      ]
 
-    dataset['initial_states'] = np.stack([
-        state_trajectory[0]
-        for state_trajectory in dataset['trajectories']['states']
-    ])
+      dataset['initial_states'] = np.stack([
+          state_trajectory[0]
+          for state_trajectory in dataset['trajectories']['states']
+      ])
 
-    num_trajectories = len(dataset['trajectories']['states'])
-    if bootstrap:
-      dataset['initial_weights'] = np.random.multinomial(
-          num_trajectories, [1.0 / num_trajectories] * num_trajectories,
-          1).astype(np.float32)[0]
-    else:
-      dataset['initial_weights'] = np.ones(num_trajectories, dtype=np.float32)
+      num_trajectories = len(dataset['trajectories']['states'])
+      if bootstrap:
+        dataset['initial_weights'] = np.random.multinomial(
+            num_trajectories, [1.0 / num_trajectories] * num_trajectories,
+            1).astype(np.float32)[0]
+      else:
+        dataset['initial_weights'] = np.ones(num_trajectories, dtype=np.float32)
 
-    dataset['trajectories']['weights'] = []
-    for i in range(len(dataset['trajectories']['masks'])):
-      dataset['trajectories']['weights'].append(
-          np.ones_like(dataset['trajectories']['masks'][i]) *
-          dataset['initial_weights'][i])
+      dataset['trajectories']['weights'] = []
+      for i in range(len(dataset['trajectories']['masks'])):
+        dataset['trajectories']['weights'].append(
+            np.ones_like(dataset['trajectories']['masks'][i]) *
+            dataset['initial_weights'][i])
 
-    dataset['initial_weights'] = tf.convert_to_tensor(
-        dataset['initial_weights'])
-    dataset['initial_states'] = tf.convert_to_tensor(dataset['initial_states'])
-    for k, v in dataset['trajectories'].items():
-      if 'initial' not in k:
-        dataset[k] = tf.convert_to_tensor(
-            np.concatenate(dataset['trajectories'][k], axis=0))
+      dataset['initial_weights'] = tf.convert_to_tensor(
+          dataset['initial_weights'])
+      dataset['initial_states'] = tf.convert_to_tensor(dataset['initial_states'])
+      for k, v in dataset['trajectories'].items():
+        if 'initial' not in k:
+          dataset[k] = tf.convert_to_tensor(
+              np.concatenate(dataset['trajectories'][k], axis=0))
 
-    self.states = dataset['states']
-    self.actions = dataset['actions']
-    self.next_states = dataset['next_states']
-    self.masks = dataset['masks']
-    self.weights = dataset['weights']
-    self.rewards = dataset['rewards']
-    self.steps = dataset['steps']
+      self.states = dataset['states']
+      print(self.states.device)
+      self.actions = dataset['actions']
+      print(self.actions.device)
+      self.next_states = dataset['next_states']
+      self.masks = dataset['masks']
+      self.weights = dataset['weights']
+      self.rewards = dataset['rewards']
+      self.steps = dataset['steps']
 
-    self.initial_states = dataset['initial_states']
-    self.initial_weights = dataset['initial_weights']
+      self.initial_states = dataset['initial_states']
+      self.initial_weights = dataset['initial_weights']
 
-    self.eps = eps
-    self.model_filename = None
+      self.eps = eps
+      self.model_filename = None
 
-    if normalize_states:
-      self.state_mean = tf.reduce_mean(self.states, 0)
-      self.state_std = tf.math.reduce_std(self.states, 0)
+      if normalize_states:
+        # do this on cpu, since it crashes otherwise
+        #with tf.device('/CPU:0'): # this needs to be done on CPU since not enough memory
+        print("calculating state mean")
+        self.state_mean = tf.reduce_mean(self.states, 0)
+        print("calculating state std")
+        # print device of state_mean
+        print(self.state_mean.device)
+        self.state_std = tf.math.reduce_std(self.states, 0)
 
-      self.initial_states = self.normalize_states(self.initial_states)
-      self.states = self.normalize_states(self.states)
-      self.next_states = self.normalize_states(self.next_states)
-    else:
-      self.state_mean = 0.0
-      self.state_std = 1.0
+        self.initial_states = self.normalize_states(self.initial_states)
+        self.states = self.normalize_states(self.states)
+        self.next_states = self.normalize_states(self.next_states)
+        # Move the tensors back to GPU
+        #with tf.device('/GPU:0'):
+        #    self.state_mean = tf.identity(self.state_mean)
+        #    self.state_std = tf.identity(self.state_std)
+        #    self.initial_states = tf.identity(self.initial_states)
+        #    self.states = tf.identity(self.states)
+        #    self.next_states = tf.identity(self.next_states)
+      else:
+        self.state_mean = 0.0
+        self.state_std = 1.0
 
-    if normalize_rewards:
-      self.reward_mean = tf.reduce_mean(self.rewards)
-      if tf.reduce_min(self.masks) == 0.0:
-        self.reward_mean = tf.zeros_like(self.reward_mean)
-      self.reward_std = tf.math.reduce_std(self.rewards)
+      if normalize_rewards:
+        self.reward_mean = tf.reduce_mean(self.rewards)
+        if tf.reduce_min(self.masks) == 0.0:
+          self.reward_mean = tf.zeros_like(self.reward_mean)
+        self.reward_std = tf.math.reduce_std(self.rewards)
 
-      self.rewards = self.normalize_rewards(self.rewards)
-    else:
-      self.reward_mean = 0.0
-      self.reward_std = 1.0
+        self.rewards = self.normalize_rewards(self.rewards)
+        # Move the tensors back to GPU
+      else:
+        self.reward_mean = 0.0
+        self.reward_std = 1.0
   # pylint: enable=super-init-not-called

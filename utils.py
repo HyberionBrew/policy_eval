@@ -215,14 +215,17 @@ class TrifingerActor(object):
       
       # print if its tensor
       # print(isinstance(obs, torch.Tensor))
+      action = None
       action_mean = self.actor.policy(obs)
       log_prob = None
       if actions is None:
           # just return the mean   
           log_prob = None
           # action mean to numpy
-          action_mean = action_mean.detach().numpy()
+          # action_mean = action_mean.detach().numpy()
+          
           if self.noisy:
+              # print("Noisy sampling")
               normal = torch.distributions.Normal(action_mean, self.std)
               action = normal.sample()
               action = torch.clamp(action,-0.397,  0.397)
@@ -230,6 +233,8 @@ class TrifingerActor(object):
               # log_prob = normal.log_prob(action)
               # log_prob = log_prob.detach().numpy()
               # action_mean = None
+          else:
+              action = action_mean.detach().numpy()
       else:
           #action_mean = None
           actions = torch.from_numpy(actions)
@@ -245,6 +250,8 @@ class TrifingerActor(object):
 
 class TrifingerWrapper(gym.Wrapper):
   def __init__(self, env_name, **kwargs):
+      
+      import trifinger_rl_datasets
       super(TrifingerWrapper, self).__init__(gym.make(env_name, **kwargs))
       
   def observation_spec(self):

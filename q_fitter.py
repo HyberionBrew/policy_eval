@@ -50,7 +50,7 @@ class QFitter(object):
   """A critic network that estimates a dual Q-function."""
 
   def __init__(self, state_dim, action_dim, critic_lr,
-               weight_decay, tau):
+               weight_decay, tau, log_frequency = 500):
     """Creates networks.
 
     Args:
@@ -68,6 +68,7 @@ class QFitter(object):
 
     self.optimizer = tfa_optimizers.AdamW(learning_rate=critic_lr,
                                           weight_decay=weight_decay)
+    self.log_frequency = log_frequency
 
   def __call__(self, states, actions):
     return self.critic_target(states, actions)
@@ -114,9 +115,9 @@ class QFitter(object):
         zip(critic_grads, self.critic.trainable_variables))
 
     soft_update(self.critic, self.critic_target, self.tau)
-    tf.summary.scalar('train/critic loss', critic_loss,
-                      step=self.optimizer.iterations)
-
+    if self.optimizer.iterations % self.log_frequency == 0:
+      tf.summary.scalar('train/critic loss', critic_loss,
+                        step=self.optimizer.iterations)
     return critic_loss
 
   #@tf.function
