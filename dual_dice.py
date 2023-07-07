@@ -83,11 +83,13 @@ class DualDICE(object):
         zip(zeta_grads, self.zeta.trainable_variables))
 
     del tape
-
-    tf.summary.scalar(
-        'train/nu loss', nu_loss, step=self.nu_optimizer.iterations)
-    tf.summary.scalar(
-        'train/zeta loss', zeta_loss, step=self.zeta_optimizer.iterations)
+    # only log every 1000 iterations
+    if self.nu_optimizer.iterations % 1000 == 0:
+      tf.summary.scalar(
+          'train/nu loss', nu_loss, step=self.nu_optimizer.iterations)
+    if self.zeta_optimizer.iterations % 1000 == 0:
+      tf.summary.scalar(
+          'train/zeta loss', zeta_loss, step=self.zeta_optimizer.iterations)
 
     return nu_loss
 

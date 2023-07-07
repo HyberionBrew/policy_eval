@@ -199,30 +199,24 @@ class D4rlActor(object):
     return mode, samples, log_probs
 
 class TrifingerActor(object):
-  def __init__(self, actor, std = 0.02, noisy= False):
+  def __init__(self, actor, noisy= False):
       self.actor = actor
-      self.std = std
       self.noisy = noisy
   def reset(self):
       self.actor.reset()
 
   def __call__(self, obs, std= 0.05, actions=None):
       self.std = std
+      assert(self.noisy == False or self.std > 0)
       if len(obs.shape) == 1:
           obs = np.expand_dims(obs, axis=0)
-      obs = torch.from_numpy(obs)
-      # if only one dimension unsqueeze batch
       
-      # print if its tensor
-      # print(isinstance(obs, torch.Tensor))
+      obs = torch.from_numpy(obs)
       action = None
-      action_mean = self.actor.policy(obs)
       log_prob = None
+      action_mean = self.actor.policy(obs)
+
       if actions is None:
-          # just return the mean   
-          log_prob = None
-          # action mean to numpy
-          # action_mean = action_mean.detach().numpy()
           
           if self.noisy:
               # print("Noisy sampling")
@@ -255,9 +249,7 @@ class TrifingerWrapper(gym.Wrapper):
       super(TrifingerWrapper, self).__init__(gym.make(env_name, **kwargs))
       
   def observation_spec(self):
-      # Your implementation here
-      return self.observation_space  # example: return action space
+      return self.observation_space 
   
   def action_spec(self):
-      # Your implementation here
-      return self.action_space  # add your implementation here
+      return self.action_space 

@@ -53,6 +53,7 @@ class Actor(tf.keras.Model):
         (action_spec.high + action_spec.low) / 2.0, dtype=tf.float32)
     self.action_scale = tf.constant(
         (action_spec.high - action_spec.low) / 2.0, dtype=tf.float32)
+  
 
   def get_dist_and_mode(
       self,
@@ -91,7 +92,55 @@ class Actor(tf.keras.Model):
         ]))
 
     return dist, mode
+    """
+    if batch_size is None:
+      batch_size = states.shape[0]
+    num_batches = (states.shape[0]) // batch_size
+    mus = []
+    log_stds = []
+    modes = []
+    for i in range(num_batches):
+      # compute batch_states, but guard for the last batch
+      # check if last batch
+      if i == num_batches - 1:
+        batch_states = states[i * batch_size:]
+      else:
+        batch_states = states[i * batch_size: (i + 1) * batch_size]
+      out = self.trunk(batch_states)
+      mu, log_std = tf.split(out, num_or_size_splits=2, axis=1)
+      # print(mu.shape, log_std.shape)
+      mode = tf.nn.tanh(mu)
 
+      log_std = tf.nn.tanh(log_std)
+      log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+      
+      log_stds.append(log_std)
+      mus.append(mu)
+      modes.append(mode)
+
+    log_std = tf.concat(log_stds, axis=0)
+    mu = tf.concat(mus, axis=0)
+    mode = tf.concat(modes, axis=0)
+    if std is None:
+      std = tf.exp(log_std)
+    else:
+      # Ugly hack
+      std = tf.stop_gradient(mu) * 0.0 + std
+
+    dist = tfd.TransformedDistribution(
+        tfd.Sample(
+            tfd.Normal(tf.zeros(mu.shape[:-1]), 1.0),
+            sample_shape=mu.shape[-1:]),
+        tfp.bijectors.Chain([
+            tfp.bijectors.Shift(shift=self.action_mean),
+            tfp.bijectors.Scale(scale=self.action_scale),
+            tfp.bijectors.Tanh(),
+            tfp.bijectors.Shift(shift=mu),
+            tfp.bijectors.ScaleMatvecDiag(scale_diag=std)
+        ]))
+
+    return dist, mode
+    """
   @tf.function
   def get_log_prob(
       self,

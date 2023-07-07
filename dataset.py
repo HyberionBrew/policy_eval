@@ -260,9 +260,11 @@ class D4rlDataset(Dataset):
             for k, v in trajectory.items():
               assert len(v) == len(trajectory['actions'])
               dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
-            print('Added trajectory %d with length %d.' % (
-                len(dataset['trajectories']['actions']),
-                len(trajectory['actions'])))
+            # print every 200 trajectories
+            if len(dataset['trajectories']['actions']) % 200 == 0:
+              print('Added trajectory %d with length %d.' % (
+                  len(dataset['trajectories']['actions']),
+                  len(trajectory['actions'])))
             if debug:
               break
         new_trajectory = end_trajectory
@@ -350,7 +352,6 @@ class D4rlDataset(Dataset):
         self.reward_std = tf.math.reduce_std(self.rewards)
 
         self.rewards = self.normalize_rewards(self.rewards)
-        # Move the tensors back to GPU
       else:
         self.reward_mean = 0.0
         self.reward_std = 1.0

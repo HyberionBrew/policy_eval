@@ -144,13 +144,14 @@ class ModelBased(object):
 
     self.done_optimizer.apply_gradients(
         zip(grads, self.done_net.trainable_variables))
-
-    tf.summary.scalar('train/dyn_loss', dyn_loss,
-                      step=self.dyn_optimizer.iterations)
-    tf.summary.scalar('train/rew_loss', reward_loss,
-                      step=self.reward_optimizer.iterations)
-    tf.summary.scalar('train/done_loss', done_loss,
-                      step=self.done_optimizer.iterations)
+    
+    if self.dyn_optimizer.iterations % 1000 == 0:
+      tf.summary.scalar('train/dyn_loss', dyn_loss,
+                        step=self.dyn_optimizer.iterations)
+      tf.summary.scalar('train/rew_loss', reward_loss,
+                        step=self.reward_optimizer.iterations)
+      tf.summary.scalar('train/done_loss', done_loss,
+                        step=self.done_optimizer.iterations)
 
   def estimate_returns(self,
                        initial_states,

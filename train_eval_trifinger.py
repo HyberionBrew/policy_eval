@@ -113,7 +113,7 @@ def main(_):
   
   gpu_memory = 12209 # GPU memory available on the machine
   # 20% of the memory, this way we can for sure launch 4 in parallel
-  allowed_gpu_memory = gpu_memory * 0.2 
+  allowed_gpu_memory = gpu_memory * 0.45 
   
   gpus = tf.config.experimental.list_physical_devices('GPU')
   if gpus:
@@ -130,9 +130,9 @@ def main(_):
 
 
 
-  module_path = os.path.abspath(os.path.join('/app/ws/trifinger_rl_datasets')) # or the path to your source code
+  module_path = os.path.abspath(os.path.join('/app/ws/trifinger_rl_datasets'))
   sys.path.insert(0, module_path)
-  module_path = os.path.abspath(os.path.join('/app/ws/trifinger-rl-example')) # or the path to your source code
+  module_path = os.path.abspath(os.path.join('/app/ws/trifinger-rl-example'))
   sys.path.insert(0, module_path)
   # get current system time
   import datetime
@@ -144,7 +144,7 @@ def main(_):
       trifinger_policy_class=FLAGS.trifinger_policy_class, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, 'tb', hparam_str))
+      os.path.join(FLAGS.save_dir, 'benchmark3', hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.d4rl:
@@ -219,7 +219,9 @@ def main(_):
     Policy = load_policy_class(FLAGS.trifinger_policy_class)
     policy_config = Policy.get_policy_config()
     policy = Policy(env.action_space, env.observation_space, env.sim_env.episode_length)
-    actor = utils.TrifingerActor(policy, std=FLAGS.target_policy_std, noisy=FLAGS.target_policy_noisy)
+    actor = utils.TrifingerActor(policy, noisy=FLAGS.target_policy_noisy)
+    # print if actor is noisy or not
+    print("Actor is noisy: ", actor.noisy)
   else:
     actor = Actor(env.observation_spec().shape[0], env.action_spec())
     actor.load_weights(behavior_dataset.model_filename)
@@ -257,33 +259,57 @@ def main(_):
                                FLAGS.lr, FLAGS.weight_decay)
 
   #@tf.function
-  def get_target_actions(states):
+  def get_target_actions(states, batch_size=5000):
     # now we need to offload to cpu and to numpy
-    states_unnorm = behavior_dataset.unnormalize_states(states)
-    # to numpy
-    states_unnorm = states_unnorm.numpy()
-    actions = actor(
-        states_unnorm,
+    # add batching to this
+    num_batches = int(np.ceil(len(states) / batch_size))
+    actions_list = []
+    for i in range(num_batches):
+      start_idx = i * batch_size
+      end_idx = min((i + 1) * batch_size, len(states))
+      batch_states = states[start_idx:end_idx]
+      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
+      batch_states_unnorm = batch_states_unnorm.numpy()
+      batch_actions = actor(
+        batch_states_unnorm,
         std=FLAGS.target_policy_std)[1]
-    # convert actions to tf
-    #print(actions.shape)
+      actions_list.append(batch_actions)
+    actions = np.concatenate(actions_list, axis=0)
     actions = tf.convert_to_tensor(actions)
     return actions
 
   #@tf.function
-  def get_target_logprobs(states, actions):
-    # need to run this as a batch operation
-    states_unnorm = behavior_dataset.unnormalize_states(states)
-    # to numpy
-    states_unnorm = states_unnorm.numpy()
-    actions = actions.numpy()
-    log_probs = actor(
-        states_unnorm,
-        actions=actions,
-        std=FLAGS.target_policy_std)[2]
-    if tf.rank(log_probs) > 1:
-      log_probs = tf.reduce_sum(log_probs, -1)
-    # to tf
+  def get_target_logprobs(states, actions, batch_size=5000):
+    num_batches = int(np.ceil(len(states) / batch_size))
+    log_probs_list = []
+    for i in range(num_batches):
+      # Calculate start and end indices for the current batch
+      start_idx = i * batch_size
+      end_idx = min((i + 1) * batch_size, len(states))
+      # Extract the current batch of states
+      batch_states = states[start_idx:end_idx]
+      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
+      # Convert unnormalized states to numpy
+      batch_states_unnorm = batch_states_unnorm.numpy()
+      # Extract the current batch of actions
+      batch_actions = actions[start_idx:end_idx].numpy()
+      # Compute log_probs for the current batch
+      
+      batch_log_probs = actor(
+          batch_states_unnorm,
+          actions=batch_actions,
+          std=FLAGS.target_policy_std)[2]
+      
+      # Sum along the last axis if the rank is greater than 1
+      if tf.rank(batch_log_probs) > 1:
+          batch_log_probs = tf.reduce_sum(batch_log_probs, -1)
+      
+      # Collect the batch_log_probs
+      log_probs_list.append(batch_log_probs)
+    # Concatenate the collected log_probs from all batches
+    log_probs = tf.concat(log_probs_list, axis=0)
+    
+    # Convert to TensorFlow tensor
     log_probs = tf.convert_to_tensor(log_probs)
     return log_probs
 
@@ -319,7 +345,7 @@ def main(_):
 
   gc.collect()
 
-  for i in tqdm.tqdm(range(FLAGS.num_updates), desc='Running Training'):
+  for i in tqdm.tqdm(range(FLAGS.num_updates), desc='Running Training',  mininterval=30.0):
     update_step()
 
     if i % FLAGS.eval_interval == 0:
@@ -411,12 +437,6 @@ def main(_):
 
       tf.summary.scalar('train/pred returns', pred_returns, step=i)
       logging.info('pred returns=%f', pred_returns)
-
-      tf.summary.scalar('train/true minus pred returns',
-                        policy_returns - pred_returns,
-                        step=i)
-      logging.info('true minus pred returns=%f', policy_returns - pred_returns)
-
 
 if __name__ == '__main__':
   app.run(main)

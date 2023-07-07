@@ -70,8 +70,25 @@ class QFitter(object):
                                           weight_decay=weight_decay)
     self.log_frequency = log_frequency
 
-  def __call__(self, states, actions):
-    return self.critic_target(states, actions)
+  def __call__(self, states, actions, batch_size = 1000):
+    # batch this call to avoid OOM
+    n_data = states.shape[0]
+    # List to store results
+    results = []
+
+    # Process in batches
+    for i in range(0, n_data, batch_size):
+      batch_states = states[i: min(i + batch_size, n_data)]
+      batch_actions = actions[i: min(i + batch_size,n_data)]
+
+      # Call the critic_target function for the batch
+      batch_result = self.critic_target(batch_states, batch_actions)
+      # Store the result
+      results.append(batch_result)
+
+    # Concatenate all batch results
+    final_result = tf.concat(results, axis=0)
+    return final_result
 
   @tf.function
   def update(self, states, actions,

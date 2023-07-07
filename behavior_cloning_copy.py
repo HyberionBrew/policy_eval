@@ -17,8 +17,9 @@
 import tensorflow.compat.v2 as tf
 from tensorflow_addons import optimizers as tfa_optimizers
 from tf_agents.specs import tensor_spec
-import policy_eval.actor as actor_lib
+import fabian.ws_ope.policy_eval.actor_copy as actor_lib
 
+import numpy as np
 
 class BehaviorCloning(object):
   """Behavior cloning."""
@@ -41,15 +42,48 @@ class BehaviorCloning(object):
     self.optimizer = tfa_optimizers.AdamW(learning_rate=learning_rate,
                                           weight_decay=weight_decay)
 
-  def __call__(self, states, actions):
+  def __call__(self, states, actions, batch_size=4000):
+    # time this call 
     import time
     start = time.time()
+
     with tf.device('CPU:0'):
       dist, _ = self.actor.get_dist_and_mode(states)
-      actions = tf.clip_by_value(actions, 1e-4 + self.action_spec.low,
-                                -1e-4 + self.action_spec.high)
+      #print("*********")
+      #print(actions.shape)
+      #print(dist.shape)
+      # do this in batches to avoid OOM
+    
       log_probs = dist.log_prob(actions)
     print("Time for call: ", time.time() - start)
+    """
+    num_batches = int(np.ceil(len(actions) / batch_size))
+    print(num_batches)
+    print(len(actions))
+    print("-------------")
+    # Placeholder for collecting log_probs from all batches
+    log_probs_list = []
+    for i in range(num_batches):
+      # Calculate start and end indices for the current batch
+      start_idx = i * batch_size
+      end_idx = min((i + 1) * batch_size, len(actions))
+      
+      # Extract the current batch of actions
+      batch_actions = actions[start_idx:end_idx]
+
+      # Clip actions
+      batch_actions = tf.clip_by_value(batch_actions, 1e-4 + self.action_spec.low,
+                                        -1e-4 + self.action_spec.high)
+      
+      # Compute log_probs for the current batch
+      print(batch_actions.shape)
+      batch_log_probs = dist.log_prob(batch_actions)
+      
+      # Collect the batch_log_probs
+      log_probs_list.append(batch_log_probs)
+    # Concatenate the collected log_probs from all batches
+    log_probs = tf.concat(log_probs_list, axis=0)
+    """
     return dist, log_probs
 
   @tf.function
@@ -77,6 +111,7 @@ class BehaviorCloning(object):
     actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
     self.optimizer.apply_gradients(
         zip(actor_grads, self.actor.trainable_variables))
+    # only log every 1000 steps
     if self.optimizer.iterations % 1000 == 0:
       tf.summary.scalar('train/actor loss', actor_loss,
                         step=self.optimizer.iterations)
