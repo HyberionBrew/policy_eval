@@ -55,7 +55,7 @@ class BehaviorCloning(object):
       # do this in batches to avoid OOM
     
       log_probs = dist.log_prob(actions)
-    print("Time for call: ", time.time() - start)
+    # print("Time for call: ", time.time() - start)
     """
     num_batches = int(np.ceil(len(actions) / batch_size))
     print(num_batches)

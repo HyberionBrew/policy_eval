@@ -67,8 +67,6 @@ def estimate_monte_carlo_returns_trifinger(env,
       episode_return += rew * (discount**t)
       t += 1
       if truncated:
-          # print episode_return
-          print(episode_return)
           break
     episode_return_sum += episode_return
     pbar.set_postfix({'mean:':  episode_return_sum / (i+1) * (1 - discount)})

@@ -226,7 +226,8 @@ class D4rlDataset(Dataset):
       noise_scale: Data augmentation noise scale.
       bootstrap: Whether to generated bootstrapped weights.
     """
-    with tf.device('cpu:0'):
+    # running on Cpu is necessary since the datasets are to large and I wanted to change as little as possible
+    with tf.device('cpu:0'): 
       dataset = dict(
           trajectories=dict(
               states=[],
@@ -306,9 +307,9 @@ class D4rlDataset(Dataset):
               np.concatenate(dataset['trajectories'][k], axis=0))
 
       self.states = dataset['states']
-      print(self.states.device)
+      #print(self.states.device)
       self.actions = dataset['actions']
-      print(self.actions.device)
+      #print(self.actions.device)
       self.next_states = dataset['next_states']
       self.masks = dataset['masks']
       self.weights = dataset['weights']
@@ -324,11 +325,11 @@ class D4rlDataset(Dataset):
       if normalize_states:
         # do this on cpu, since it crashes otherwise
         #with tf.device('/CPU:0'): # this needs to be done on CPU since not enough memory
-        print("calculating state mean")
+        #print("calculating state mean")
         self.state_mean = tf.reduce_mean(self.states, 0)
-        print("calculating state std")
+        #print("calculating state std")
         # print device of state_mean
-        print(self.state_mean.device)
+        #print(self.state_mean.device)
         self.state_std = tf.math.reduce_std(self.states, 0)
 
         self.initial_states = self.normalize_states(self.initial_states)

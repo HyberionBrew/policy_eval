@@ -49,7 +49,7 @@ class BehaviorCloning(object):
       actions = tf.clip_by_value(actions, 1e-4 + self.action_spec.low,
                                 -1e-4 + self.action_spec.high)
       log_probs = dist.log_prob(actions)
-    print("Time for call: ", time.time() - start)
+    # print("Time for call: ", time.time() - start)
     return dist, log_probs
 
   @tf.function

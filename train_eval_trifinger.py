@@ -50,11 +50,11 @@ import torch
 EPS = np.finfo(np.float32).eps
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'Reacher-v2',
+flags.DEFINE_string('env_name', 'trifinger-cube-push-real-mixed-v0',
                     'Environment for training/evaluation.')
-flags.DEFINE_bool('d4rl', False, 'Whether to use D4RL envs and datasets.')
-flags.DEFINE_bool('trifinger', False, 'Whether to use Trifinger envs and datasets.')
-flags.DEFINE_bool('no_mc', False, 'Whether to use Monte Carlo returns.')
+
+flags.DEFINE_bool('trifinger', True, 'Whether to use Trifinger envs and datasets.')
+
 flags.DEFINE_string('d4rl_policy_filename', None,
                     'Path to saved pickle of D4RL policy.')
 flags.DEFINE_string('trifinger_policy_class', "trifinger_rl_example.example.TorchPushPolicy",
@@ -66,11 +66,9 @@ flags.DEFINE_float('behavior_policy_std', None,
                    'Noise scale of behavior policy.')
 flags.DEFINE_float('target_policy_std', 0.1, 'Noise scale of target policy.')
 flags.DEFINE_bool('target_policy_noisy', False, 'inject noise into the actions of the target policy')
-flags.DEFINE_integer('num_trajectories', 1000, 'Number of trajectories.')
+# flags.DEFINE_integer('num_trajectories', 1000, 'Number of trajectories.') # this is not actually used
 flags.DEFINE_integer('sample_batch_size', 256, 'Batch size.')
-flags.DEFINE_integer(
-    'num_mc_episodes', 256,
-    'Number of episodes to unroll to estimate Monte Carlo returns.')
+
 flags.DEFINE_integer('num_updates', 1_000_000, 'Number of updates.')
 flags.DEFINE_integer('eval_interval', 10_000, 'Logging interval.')
 flags.DEFINE_integer('log_interval', 10_000, 'Logging interval.')
@@ -107,12 +105,10 @@ def main(_):
   tf.random.set_seed(FLAGS.seed)
   np.random.seed(FLAGS.seed)
   # assert not FLAGS.d4rl and FlAGS.trifinger
-  assert(not FLAGS.d4rl or not FLAGS.trifinger)
-  # import trifinger
-  # set the maximum used gpu memory
-  
+  assert(FLAGS.trifinger)
+
   gpu_memory = 12209 # GPU memory available on the machine
-  # 20% of the memory, this way we can for sure launch 4 in parallel
+  # 45% of the memory, this way we can launch a second process on the same GPU
   allowed_gpu_memory = gpu_memory * 0.45 
   
   gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -128,12 +124,12 @@ def main(_):
       # Virtual devices must be set before GPUs have been initialized
       print(e, " GPUs must be set at program startup")
 
-
-
+  # import trifinger 
   module_path = os.path.abspath(os.path.join('/app/ws/trifinger_rl_datasets'))
   sys.path.insert(0, module_path)
   module_path = os.path.abspath(os.path.join('/app/ws/trifinger-rl-example'))
   sys.path.insert(0, module_path)
+
   # get current system time
   import datetime
   now = datetime.datetime.now()
@@ -147,24 +143,7 @@ def main(_):
       os.path.join(FLAGS.save_dir, 'benchmark3', hparam_str))
   summary_writer.set_as_default()
 
-  if FLAGS.d4rl:
-    d4rl_env = gym.make(FLAGS.env_name)
-    gym_spec = gym.spec(FLAGS.env_name)
-    if gym_spec.max_episode_steps in [0, None]:  # Add TimeLimit wrapper.
-      gym_env = time_limit.TimeLimit(d4rl_env, max_episode_steps=1000)
-    else:
-      gym_env = d4rl_env
-    gym_env.seed(FLAGS.seed)
-    env = tf_py_environment.TFPyEnvironment(gym_wrapper.GymWrapper(gym_env))
-
-    behavior_dataset = D4rlDataset(
-        d4rl_env,
-        normalize_states=FLAGS.normalize_states,
-        normalize_rewards=FLAGS.normalize_rewards,
-        noise_scale=FLAGS.noise_scale,
-        bootstrap=FLAGS.bootstrap)
-  
-  elif FLAGS.trifinger:
+  if FLAGS.trifinger:
     import trifinger_rl_datasets
     trifinger_env = utils.TrifingerWrapper(
         FLAGS.env_name,
@@ -173,13 +152,7 @@ def main(_):
         image_obs=False,
         visualization=False,  # enable visualization
     ) # enable visualization
-    gym_spec = gym.spec(FLAGS.env_name)
-    if gym_spec.max_episode_steps in [0, None]:  # Add TimeLimit wrapper.
-        gym_env = time_limit.TimeLimit(trifinger_env, max_episode_steps=1000)
-    else:
-        gym_env = trifinger_env
-    env = gym_env
-    # gym_env.seed(FLAGS.seed) # does not exist for trifinger
+    env = trifinger_env
     behavior_dataset = D4rlDataset(
         env,
         normalize_states=FLAGS.normalize_states,
@@ -190,29 +163,15 @@ def main(_):
     print("Finished loading Trifinger Dataset")
 
   else:
-    env = suite_mujoco.load(FLAGS.env_name)
-    env.seed(FLAGS.seed)
-    env = tf_py_environment.TFPyEnvironment(env)
-
-    data_file_name = os.path.join(FLAGS.data_dir, FLAGS.env_name, '0',
-                                  f'dualdice_{FLAGS.behavior_policy_std}.pckl')
-    behavior_dataset = Dataset(
-        data_file_name,
-        FLAGS.num_trajectories,
-        normalize_states=FLAGS.normalize_states,
-        normalize_rewards=FLAGS.normalize_rewards,
-        noise_scale=FLAGS.noise_scale,
-        bootstrap=FLAGS.bootstrap)
+    # Throw unsupported error
+    # Trifinger and other envs cannot be run in the same script since there are some incompatibilities
+    raise NotImplementedError
 
   tf_dataset = behavior_dataset.with_uniform_sampling(FLAGS.sample_batch_size)
   tf_dataset_iter = iter(tf_dataset)
 
-  if FLAGS.d4rl:
-    with tf.io.gfile.GFile(FLAGS.d4rl_policy_filename, 'rb') as f:
-      policy_weights = pickle.load(f)
-    actor = utils.D4rlActor(env, policy_weights,
-                            is_dapg='dapg' in FLAGS.d4rl_policy_filename)
-  elif FLAGS.trifinger:
+  
+  if FLAGS.trifinger:
     from trifinger_rl_datasets import PolicyBase
     from trifinger_rl_datasets.evaluate_sim import load_policy_class
     
@@ -223,24 +182,8 @@ def main(_):
     # print if actor is noisy or not
     print("Actor is noisy: ", actor.noisy)
   else:
-    actor = Actor(env.observation_spec().shape[0], env.action_spec())
-    actor.load_weights(behavior_dataset.model_filename)
-
-  if not(FLAGS.no_mc):
-    if FLAGS.trifinger:
-      policy_returns = utils.estimate_monte_carlo_returns_trifinger(env, FLAGS.discount,
-                                                      actor,
-                                                      FLAGS.target_policy_std,
-                                                      FLAGS.num_mc_episodes)
-    else:
-        policy_returns = utils.estimate_monte_carlo_returns(env, FLAGS.discount,
-                                                        actor,
-                                                        FLAGS.target_policy_std,
-                                                        FLAGS.num_mc_episodes)
-  else:
-    logging.info('Using precomputed MC returns')
-    policy_returns = 0.5
-  logging.info('Estimated Per-Step Average Returns=%f', policy_returns)
+    # Throw unsupported error
+    raise NotImplementedError
 
   if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
     model = QFitter(env.observation_spec().shape[0],
@@ -268,7 +211,7 @@ def main(_):
       start_idx = i * batch_size
       end_idx = min((i + 1) * batch_size, len(states))
       batch_states = states[start_idx:end_idx]
-      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
+      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
       batch_states_unnorm = batch_states_unnorm.numpy()
       batch_actions = actor(
         batch_states_unnorm,
@@ -326,10 +269,6 @@ def main(_):
     next_actions = get_target_actions(next_states)
 
     if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
-      # print states shape in tf
-      #print(states.shape)
-      #print(next_actions.shape)
-      #print("....................")
       model.update(states, actions, next_states, next_actions, rewards, masks,
                    weights, FLAGS.discount, min_reward, max_reward)
     elif 'mb' in FLAGS.algo:
