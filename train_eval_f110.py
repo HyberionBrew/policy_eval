@@ -21,21 +21,23 @@ import os
 import pickle
 from absl import app
 
+import sys
+# sys.path.append("/mnt/hdd2/fabian/demo/ws_ope/policy_eval")
 
 from absl import flags
 from absl import logging
 # import d4rl  # pylint: disable=unused-import
-import gymnasium as gym
+import gym
 #import trifinger_rl_datasets
 from gym.wrappers import time_limit
 import numpy as np
 import tensorflow as tf
 from tf_agents.environments import gym_wrapper
-from tf_agents.environments import suite_mujoco
+# from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
 import tqdm
 
-from policy_eval import utils
+from policy_eval import utils_f110 as utils
 from policy_eval.actor import Actor
 from policy_eval.behavior_cloning import BehaviorCloning
 from policy_eval.dataset import D4rlDataset
@@ -44,10 +46,11 @@ from policy_eval.dual_dice import DualDICE
 from policy_eval.model_based import ModelBased
 from policy_eval.q_fitter import QFitter
 
+from ftg_agents.agents import *
 
 import os
 import sys
-import torch
+# import torch
 
 EPS = np.finfo(np.float32).eps
 FLAGS = flags.FLAGS
@@ -55,12 +58,14 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'trifinger-cube-push-real-mixed-v0',
                     'Environment for training/evaluation.')
 
-flags.DEFINE_bool('trifinger', True, 'Whether to use Trifinger envs and datasets.')
-
-flags.DEFINE_string('d4rl_policy_filename', None,
-                    'Path to saved pickle of D4RL policy.')
-flags.DEFINE_string('trifinger_policy_class', "trifinger_rl_example.example.TorchPushPolicy",
-                    'Policy class name for Trifinger.')
+flags.DEFINE_bool('trifinger', False, 'Whether to use Trifinger envs and datasets.')
+flags.DEFINE_bool('f110', True, 'Whether to use Trifinger envs and datasets.')
+flags.DEFINE_string('target_policy', 'StochasticFTGAgent', 'Name of target agent')
+flags.DEFINE_float('speed', 1.0, 'Mean speed of the car, for the agent') 
+#flags.DEFINE_string('d4rl_policy_filename', None,
+#                    'Path to saved pickle of D4RL policy.')
+#flags.DEFINE_string('trifinger_policy_class', "trifinger_rl_example.example.TorchPushPolicy",
+#                    'Policy class name for Trifinger.')
 flags.DEFINE_integer('seed', 0, 'Fixed random seed for training.')
 flags.DEFINE_float('lr', 3e-4, 'Critic learning rate.')
 flags.DEFINE_float('weight_decay', 1e-5, 'Weight decay.')
@@ -107,7 +112,7 @@ def main(_):
   tf.random.set_seed(FLAGS.seed)
   np.random.seed(FLAGS.seed)
   # assert not FLAGS.d4rl and FlAGS.trifinger
-  assert(FLAGS.trifinger)
+ 
 
   gpu_memory = 12209 # GPU memory available on the machine
   # 45% of the memory, this way we can launch a second process on the same GPU
@@ -126,11 +131,8 @@ def main(_):
       # Virtual devices must be set before GPUs have been initialized
       print(e, " GPUs must be set at program startup")
 
-  # import trifinger 
-  module_path = os.path.abspath(os.path.join('/app/ws/trifinger_rl_datasets'))
-  sys.path.insert(0, module_path)
-  module_path = os.path.abspath(os.path.join('/app/ws/trifinger-rl-example'))
-  sys.path.insert(0, module_path)
+  # import f110
+
 
   # get current system time
   import datetime
@@ -139,30 +141,43 @@ def main(_):
 
   hparam_str = make_hparam_string(
       seed=FLAGS.seed, env_name=FLAGS.env_name, algo=FLAGS.algo,
-      trifinger_policy_class=FLAGS.trifinger_policy_class, 
+      target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, 'benchmark3', hparam_str))
+      os.path.join(FLAGS.save_dir, 'benchmark_f110', hparam_str))
   summary_writer.set_as_default()
 
-  if FLAGS.trifinger:
-    import trifinger_rl_datasets
-    trifinger_env = utils.TrifingerWrapper(
+  if FLAGS.f110:
+    from f110_gym.envs.datatset_env import F1tenthDatasetEnv
+    """ trifinger_env = utils.TrifingerWrapper(
         FLAGS.env_name,
         set_terminals=True,
         flatten_obs=True,
         image_obs=False,
         visualization=False,  # enable visualization
-    ) # enable visualization
-    env = trifinger_env
+    ) # enable visualization """
+    F110Env = F1tenthDatasetEnv(
+        FLAGS.env_name,
+        dict(), # kwargs?
+        # only terminals are available as of tight now 
+        set_terminals=True,
+        flatten_obs=True,
+        flatten_acts=True,
+        laser_obs=False,
+        flatten_trajectories=True,
+        subsample_laser=10,
+        padd_trajectories=False,
+        max_trajectories = 10,
+        )
+    env = F110Env
     behavior_dataset = D4rlDataset(
         env,
         normalize_states=FLAGS.normalize_states,
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
-        debug=False)
-    print("Finished loading Trifinger Dataset")
+        debug=True)
+    print("Finished loading F110 Dataset")
 
   else:
     # Throw unsupported error
@@ -183,6 +198,14 @@ def main(_):
     actor = utils.TrifingerActor(policy, noisy=FLAGS.target_policy_noisy)
     # print if actor is noisy or not
     print("Actor is noisy: ", actor.noisy)
+  if FLAGS.f110:
+    agents = {
+    'DeterministicFTGAgent': DeterministicFTGAgent,
+    'StochasticFTGAgent': StochasticFTGAgent,
+    'StochasticFTGAgentRandomSpeed': StochasticFTGAgentRandomSpeed, 
+    'StochasticFTGAgentDynamicSpeed': StochasticFTGAgentDynamicSpeed} #, 'FTGAgent': FTGAgent, 'PurePursuitAgent': PurePursuitAgent}
+    agent = agents[FLAGS.agent](env, sub_sample=10, speed=FLAGS.speed)
+    actor = agent
   else:
     # Throw unsupported error
     raise NotImplementedError
@@ -214,13 +237,15 @@ def main(_):
       end_idx = min((i + 1) * batch_size, len(states))
       batch_states = states[start_idx:end_idx]
       batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
-      batch_states_unnorm = batch_states_unnorm.numpy()
+      #batch_states_unnorm = batch_states_unnorm.numpy()
       batch_actions = actor(
         batch_states_unnorm,
         std=FLAGS.target_policy_std)[1]
       actions_list.append(batch_actions)
-    actions = np.concatenate(actions_list, axis=0)
-    actions = tf.convert_to_tensor(actions)
+    #actions = np.concatenate(actions_list, axis=0)
+    # tf concact
+    actions = tf.concat(actions_list, axis=0)
+    #actions = tf.convert_to_tensor(actions)
     return actions
 
   #@tf.function
@@ -234,10 +259,8 @@ def main(_):
       # Extract the current batch of states
       batch_states = states[start_idx:end_idx]
       batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
-      # Convert unnormalized states to numpy
-      batch_states_unnorm = batch_states_unnorm.numpy()
       # Extract the current batch of actions
-      batch_actions = actions[start_idx:end_idx].numpy()
+      batch_actions = actions[start_idx:end_idx]
       # Compute log_probs for the current batch
       
       batch_log_probs = actor(

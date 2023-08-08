@@ -267,6 +267,9 @@ class D4rlDataset(Dataset):
                   len(dataset['trajectories']['actions']),
                   len(trajectory['actions'])))
             if debug:
+              print('Added trajectory %d with length %d.' % (
+                  len(dataset['trajectories']['actions']),
+                  len(trajectory['actions'])))
               break
         new_trajectory = end_trajectory
 
