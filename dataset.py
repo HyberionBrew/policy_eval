@@ -215,7 +215,8 @@ class D4rlDataset(Dataset):
                eps = 1e-5,
                noise_scale = 0.0,
                bootstrap = True,
-               debug=False):
+               debug=False, 
+               path=None):
     """Processes data from D4RL environment.
 
     Args:
@@ -235,7 +236,10 @@ class D4rlDataset(Dataset):
               next_states=[],
               rewards=[],
               masks=[]))
-      d4rl_dataset = d4rl_env.get_dataset()
+      if path is not None:
+        d4rl_dataset = d4rl_env.get_dataset(zarr_path=path)
+      else:
+        d4rl_dataset = d4rl_env.get_dataset()
       dataset_length = len(d4rl_dataset['actions'])
       new_trajectory = True
       for idx in range(dataset_length):

@@ -29,6 +29,9 @@ from absl import logging
 # import d4rl  # pylint: disable=unused-import
 import gym
 #import trifinger_rl_datasets
+import f110_gym
+import f110_orl_dataset
+
 from gym.wrappers import time_limit
 import numpy as np
 import tensorflow as tf
@@ -148,7 +151,7 @@ def main(_):
   summary_writer.set_as_default()
 
   if FLAGS.f110:
-    from f110_gym.envs.datatset_env import F1tenthDatasetEnv
+    #from f110_gym.envs.datatset_env import F1tenthDatasetEnv
     """ trifinger_env = utils.TrifingerWrapper(
         FLAGS.env_name,
         set_terminals=True,
@@ -156,7 +159,7 @@ def main(_):
         image_obs=False,
         visualization=False,  # enable visualization
     ) # enable visualization """
-    F110Env = F1tenthDatasetEnv(
+    F110Env = f110_gym.F1tenthDatasetEnv(
         FLAGS.env_name,
         dict(), # kwargs?
         # only terminals are available as of tight now 
@@ -176,7 +179,8 @@ def main(_):
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
-        debug=True)
+        debug=True,
+        path = "/app/ws/trajectories.zarr")
     print("Finished loading F110 Dataset")
 
   else:
