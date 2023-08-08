@@ -32,7 +32,7 @@ import gym
 from gym.wrappers import time_limit
 import numpy as np
 import tensorflow as tf
-from tf_agents.environments import gym_wrapper
+# from tf_agents.environments import gym_wrapper
 # from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
 import tqdm
