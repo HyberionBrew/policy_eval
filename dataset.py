@@ -123,6 +123,7 @@ class Dataset(object):
     self.steps = dataset['steps']
 
     self.initial_states = dataset['initial_states']
+    # self.initial_scans = dataset['initial_scans']
     self.initial_weights = dataset['initial_weights']
 
     self.eps = eps
@@ -241,6 +242,12 @@ class D4rlDataset(Dataset):
       else:
         d4rl_dataset = d4rl_env.get_dataset()
       dataset_length = len(d4rl_dataset['actions'])
+      print(d4rl_dataset['terminals'].shape)
+      # print number of 1 terminals
+      print(np.sum(d4rl_dataset['terminals']))
+      # print amount of timeouts
+      print(np.sum(d4rl_dataset['timeouts']))
+      print("#########")
       new_trajectory = True
       for idx in range(dataset_length):
         if new_trajectory:
@@ -274,13 +281,14 @@ class D4rlDataset(Dataset):
               print('Added trajectory %d with length %d.' % (
                   len(dataset['trajectories']['actions']),
                   len(trajectory['actions'])))
-              break
+              # break
         new_trajectory = end_trajectory
 
       if noise_scale > 0.0:
         dataset['trajectories'] = augment_data(dataset['trajectories'],  # pytype: disable=wrong-arg-types  # dict-kwargs
                                               noise_scale)
-
+      #print(dataset['trajectories']['states'].shape)
+      #print("üüüüü")
       dataset['trajectories']['steps'] = [
           np.arange(len(state_trajectory))
           for state_trajectory in dataset['trajectories']['states']
@@ -364,3 +372,193 @@ class D4rlDataset(Dataset):
         self.reward_mean = 0.0
         self.reward_std = 1.0
   # pylint: enable=super-init-not-called
+
+class F110Dataset(Dataset):
+  """Dataset class for policy evaluation."""
+
+  # pylint: disable=super-init-not-called
+  def __init__(self,
+               d4rl_env,
+               normalize_states = False,
+               normalize_rewards = False,
+               eps = 1e-5,
+               noise_scale = 0.0,
+               bootstrap = True,
+               debug=False, 
+               path=None,
+               scans_as_states=False):
+    """Processes data from F110 environment.
+
+    Args:
+      d4rl_env: gym.Env corresponding to F110 environment.
+      normalize_states: whether to normalize the states.
+      normalize_rewards: whether to normalize the rewards.
+      eps: Epsilon used for normalization.
+      noise_scale: Data augmentation noise scale.
+      bootstrap: Whether to generated bootstrapped weights.
+    """
+    # running on Cpu is necessary since the datasets are to large and I wanted to change as little as possible
+    with tf.device('cpu:0'): 
+      dataset = dict(
+          trajectories=dict(
+              states=[],
+              scans = [],
+              actions=[],
+              next_scans=[],
+              next_states=[],
+              rewards=[],
+              masks=[]))
+      if path is not None:
+        d4rl_dataset = d4rl_env.get_dataset(zarr_path=path)
+      else:
+        d4rl_dataset = d4rl_env.get_dataset()
+      dataset_length = len(d4rl_dataset['actions'])
+      new_trajectory = True
+      for idx in range(dataset_length):
+        if new_trajectory:
+          trajectory = dict(
+              states=[], scans=[], actions=[], next_states=[], next_scans=[], rewards=[], masks=[])
+
+        trajectory['states'].append(d4rl_dataset['observations'][idx])
+        trajectory['scans'].append(d4rl_dataset['scan'][idx])
+        trajectory['actions'].append(d4rl_dataset['actions'][idx])
+        trajectory['rewards'].append(d4rl_dataset['rewards'][idx])
+        trajectory['masks'].append(1.0 - d4rl_dataset['terminals'][idx])
+        if not new_trajectory:
+          # Significant BUG!????
+          trajectory['next_states'].append(d4rl_dataset['observations'][idx])
+          trajectory['next_scans'].append(d4rl_dataset['scan'][idx])
+
+        end_trajectory = (d4rl_dataset['terminals'][idx] or
+                          d4rl_dataset['timeouts'][idx])
+        if end_trajectory:
+          trajectory['next_states'].append(d4rl_dataset['observations'][idx])
+          trajectory['next_scans'].append(d4rl_dataset['scan'][idx])
+
+          if d4rl_dataset['timeouts'][idx] and not d4rl_dataset['terminals'][idx]:
+            for key in trajectory:
+              del trajectory[key][-1]
+          if trajectory['actions']:
+            for k, v in trajectory.items():
+              assert len(v) == len(trajectory['actions'])
+              dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
+            # print every 200 trajectories
+            if len(dataset['trajectories']['actions']) % 200 == 0:
+              print('Added trajectory %d with length %d.' % (
+                  len(dataset['trajectories']['actions']),
+                  len(trajectory['actions'])))
+            if debug:
+              print('Added trajectory %d with length %d.' % (
+                  len(dataset['trajectories']['actions']),
+                  len(trajectory['actions'])))
+              # break
+        new_trajectory = end_trajectory
+
+      if noise_scale > 0.0:
+        dataset['trajectories'] = augment_data(dataset['trajectories'],  # pytype: disable=wrong-arg-types  # dict-kwargs
+                                              noise_scale)
+      #print(dataset['trajectories']['states'].shape)
+      #print("üüüüü")
+      dataset['trajectories']['steps'] = [
+          np.arange(len(state_trajectory))
+          for state_trajectory in dataset['trajectories']['states']
+      ]
+
+      dataset['initial_states'] = np.stack([
+          state_trajectory[0]
+          for state_trajectory in dataset['trajectories']['states']
+      ])
+      dataset['initial_scans'] = np.stack([
+          state_trajectory[0]
+          for state_trajectory in dataset['trajectories']['scans']
+      ])
+
+      num_trajectories = len(dataset['trajectories']['states'])
+      if bootstrap:
+        dataset['initial_weights'] = np.random.multinomial(
+            num_trajectories, [1.0 / num_trajectories] * num_trajectories,
+            1).astype(np.float32)[0]
+      else:
+        dataset['initial_weights'] = np.ones(num_trajectories, dtype=np.float32)
+
+      dataset['trajectories']['weights'] = []
+      for i in range(len(dataset['trajectories']['masks'])):
+        dataset['trajectories']['weights'].append(
+            np.ones_like(dataset['trajectories']['masks'][i]) *
+            dataset['initial_weights'][i])
+
+      dataset['initial_weights'] = tf.convert_to_tensor(
+          dataset['initial_weights'])
+      dataset['initial_states'] = tf.convert_to_tensor(dataset['initial_states'])
+      dataset['initial_scans'] = tf.convert_to_tensor(dataset['initial_scans'])
+      for k, v in dataset['trajectories'].items():
+        if 'initial' not in k:
+          dataset[k] = tf.convert_to_tensor(
+              np.concatenate(dataset['trajectories'][k], axis=0))
+
+      self.states = dataset['states']
+      self.scans = dataset['scans']
+      self.next_scans = dataset['next_scans']
+      #print(self.states.device)
+      self.actions = dataset['actions']
+      #print(self.actions.device)
+      self.initial_scans = dataset['initial_scans']
+      self.next_states = dataset['next_states']
+      self.masks = dataset['masks']
+      self.weights = dataset['weights']
+      self.rewards = dataset['rewards']
+      self.steps = dataset['steps']
+
+      self.initial_states = dataset['initial_states']
+      self.initial_weights = dataset['initial_weights']
+
+      if scans_as_states:
+        self.states = self.scans
+        self.next_states = self.next_scans
+        self.initial_states = self.initial_scans
+
+      self.eps = eps
+      self.model_filename = None
+
+      if normalize_states:
+        # do this on cpu, since it crashes otherwise
+        #with tf.device('/CPU:0'): # this needs to be done on CPU since not enough memory
+        #print("calculating state mean")
+        self.state_mean = tf.reduce_mean(self.states, 0)
+        #print("calculating state std")
+        # print device of state_mean
+        #print(self.state_mean.device)
+        self.state_std = tf.math.reduce_std(self.states, 0)
+
+        self.initial_states = self.normalize_states(self.initial_states)
+        self.states = self.normalize_states(self.states)
+        self.next_states = self.normalize_states(self.next_states)
+        # Move the tensors back to GPU
+        #with tf.device('/GPU:0'):
+        #    self.state_mean = tf.identity(self.state_mean)
+        #    self.state_std = tf.identity(self.state_std)
+        #    self.initial_states = tf.identity(self.initial_states)
+        #    self.states = tf.identity(self.states)
+        #    self.next_states = tf.identity(self.next_states)
+      else:
+        self.state_mean = 0.0
+        self.state_std = 1.0
+
+      if normalize_rewards:
+        self.reward_mean = tf.reduce_mean(self.rewards)
+        if tf.reduce_min(self.masks) == 0.0:
+          self.reward_mean = tf.zeros_like(self.reward_mean)
+        self.reward_std = tf.math.reduce_std(self.rewards)
+
+        self.rewards = self.normalize_rewards(self.rewards)
+      else:
+        self.reward_mean = 0.0
+        self.reward_std = 1.0
+
+  #def with_uniform_sampling(self, sample_batch_size):
+  #  return tf.data.Dataset.from_tensor_slices(
+  #        (self.states, self.scans, self.actions, self.next_states,self.next_scans, self.rewards, self.masks,
+  #        self.weights, self.steps)).repeat().shuffle(
+  #            self.states.shape[0], reshuffle_each_iteration=True).batch(
+  #                sample_batch_size, drop_remainder=True).apply(
+  #      tf.data.experimental.copy_to_device("/gpu:0")).prefetch(tf.data.AUTOTUNE)

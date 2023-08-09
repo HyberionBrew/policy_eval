@@ -252,3 +252,15 @@ class TrifingerWrapper(gym.Wrapper):
   def action_spec(self):
       return self.action_space 
 """
+
+class F110Wrapper(gym.Wrapper):
+  def __init__(self, env_name, **kwargs):
+      
+      # import trifinger_rl_datasets
+      super(F110Wrapper, self).__init__(gym.make(env_name, **kwargs))
+      
+  def observation_spec(self):
+      return self.observation_space 
+  
+  def action_spec(self):
+      return self.action_space 

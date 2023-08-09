@@ -31,6 +31,7 @@ import gym
 #import trifinger_rl_datasets
 import f110_gym
 import f110_orl_dataset
+from f110_gym.envs.base_classes import Integrator
 
 from gym.wrappers import time_limit
 import numpy as np
@@ -43,7 +44,7 @@ import tqdm
 from policy_eval import utils_f110 as utils
 from policy_eval.actor import Actor
 from policy_eval.behavior_cloning import BehaviorCloning
-from policy_eval.dataset import D4rlDataset
+from policy_eval.dataset import F110Dataset
 from policy_eval.dataset import Dataset
 from policy_eval.dual_dice import DualDICE
 from policy_eval.model_based import ModelBased
@@ -159,35 +160,47 @@ def main(_):
         image_obs=False,
         visualization=False,  # enable visualization
     ) # enable visualization """
-    F110Env = f110_gym.F1tenthDatasetEnv(
-        FLAGS.env_name,
-        dict(), # kwargs?
+    # gym.make(, **kwargs)
+    F110Env = gym.make('f110_with_dataset-v0',
         # only terminals are available as of tight now 
         set_terminals=True,
         flatten_obs=True,
         flatten_acts=True,
-        laser_obs=False,
+        laser_obs=True,
         flatten_trajectories=True,
         subsample_laser=10,
         padd_trajectories=False,
         max_trajectories = 10,
+         **dict(name='f110_with_dataset-v0',
+                map="/app/ws/example_map", 
+                map_ext=".png", 
+                num_agents=1, 
+                timestep=0.01, 
+                integrator=Integrator.RK4)
         )
+
     env = F110Env
-    behavior_dataset = D4rlDataset(
+    # print available classes of env
+    print(env.observation_space)
+    
+    print("-------")
+    behavior_dataset = F110Dataset(
         env,
         normalize_states=FLAGS.normalize_states,
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
         debug=True,
-        path = "/app/ws/trajectories.zarr")
+        path = "/app/ws/trajectories.zarr",
+        scans_as_states=True,)
     print("Finished loading F110 Dataset")
+    print(behavior_dataset.initial_states.shape)
+    
 
   else:
     # Throw unsupported error
     # Trifinger and other envs cannot be run in the same script since there are some incompatibilities
     raise NotImplementedError
-
   tf_dataset = behavior_dataset.with_uniform_sampling(FLAGS.sample_batch_size)
   tf_dataset_iter = iter(tf_dataset)
 
@@ -208,40 +221,48 @@ def main(_):
     'StochasticFTGAgent': StochasticFTGAgent,
     'StochasticFTGAgentRandomSpeed': StochasticFTGAgentRandomSpeed, 
     'StochasticFTGAgentDynamicSpeed': StochasticFTGAgentDynamicSpeed} #, 'FTGAgent': FTGAgent, 'PurePursuitAgent': PurePursuitAgent}
-    agent = agents[FLAGS.agent](env, sub_sample=10, speed=FLAGS.speed)
+    agent = agents[FLAGS.target_policy](env, 
+                                        sub_sample_input=False,
+                                        sub_sample=10, 
+                                        speed=FLAGS.speed)
     actor = agent
   else:
     # Throw unsupported error
     raise NotImplementedError
 
   if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
-    model = QFitter(env.observation_spec().shape[0],
+    print("SPEC", behavior_dataset.states.shape[1])
+    model = QFitter( behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
                     env.action_spec().shape[0], FLAGS.lr, FLAGS.weight_decay,
                     FLAGS.tau)
   elif 'mb' in FLAGS.algo:
-    model = ModelBased(env.observation_spec().shape[0],
+    model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
                        env.action_spec().shape[0], learning_rate=FLAGS.lr,
                        weight_decay=FLAGS.weight_decay)
   elif 'dual_dice' in FLAGS.algo:
-    model = DualDICE(env.observation_spec().shape[0],
+    model = DualDICE(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
                      env.action_spec().shape[0], FLAGS.weight_decay)
   if 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
-    behavior = BehaviorCloning(env.observation_spec().shape[0],
+    behavior = BehaviorCloning(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
                                env.action_spec(),
                                FLAGS.lr, FLAGS.weight_decay)
 
   #@tf.function
-  def get_target_actions(states, batch_size=5000):
+  def get_target_actions(states, batch_size=100):
     # now we need to offload to cpu and to numpy
     # add batching to this
+    # print(states.shape)
+    # exit()
     num_batches = int(np.ceil(len(states) / batch_size))
     actions_list = []
     for i in range(num_batches):
       start_idx = i * batch_size
       end_idx = min((i + 1) * batch_size, len(states))
-      batch_states = states[start_idx:end_idx]
-      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
+      batch_states_unnorm = states[start_idx:end_idx]
+      #batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
       #batch_states_unnorm = batch_states_unnorm.numpy()
+      #print(batch_states_unnorm.shape)
+      # print("---------------")
       batch_actions = actor(
         batch_states_unnorm,
         std=FLAGS.target_policy_std)[1]
@@ -294,9 +315,14 @@ def main(_):
   def update_step():
     (states, actions, next_states, rewards, masks, weights,
      _) = next(tf_dataset_iter)
+    # time this
+    import time
+    start = time.time()
     initial_actions = get_target_actions(behavior_dataset.initial_states)
     next_actions = get_target_actions(next_states)
-
+    end = time.time()
+    print("Time to get target actions: ", end-start)
+    
     if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
       model.update(states, actions, next_states, next_actions, rewards, masks,
                    weights, FLAGS.discount, min_reward, max_reward)
