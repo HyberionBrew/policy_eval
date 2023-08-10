@@ -98,7 +98,7 @@ flags.DEFINE_boolean('bootstrap', True,
                      'Whether to generated bootstrap weights.')
 flags.DEFINE_enum('algo', 'fqe', ['fqe', 'dual_dice', 'mb', 'iw', 'dr'],
                   'Algorithm for policy evaluation.')
-flags.DEFINE_float('noise_scale', 0.25, 'Noise scaling for data augmentation.')
+flags.DEFINE_float('noise_scale', 0.0, 'Noise scaling for data augmentation.') # 0.25
 
 
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
@@ -161,19 +161,20 @@ def main(_):
         visualization=False,  # enable visualization
     ) # enable visualization """
     # gym.make(, **kwargs)
+    subsample_laser = 10
     F110Env = gym.make('f110_with_dataset-v0',
         # only terminals are available as of tight now 
         set_terminals=True,
         flatten_obs=True,
         flatten_acts=True,
-        laser_obs=True,
+        laser_obs=False,
         flatten_trajectories=True,
-        subsample_laser=10,
+        subsample_laser=subsample_laser,
         padd_trajectories=False,
         max_trajectories = None,
          **dict(name='f110_with_dataset-v0',
-                map="/app/ws/example_map", 
-                map_ext=".png", 
+                map="/app/ws/ellipse_map2", 
+                map_ext=".pgm", 
                 num_agents=1, 
                 timestep=0.01, 
                 integrator=Integrator.RK4)
@@ -192,7 +193,7 @@ def main(_):
         bootstrap=FLAGS.bootstrap,
         debug=True,
         path = "/app/ws/trajectories.zarr",
-        scans_as_states=True,)
+        scans_as_states=False,)
     print("Finished loading F110 Dataset")
     print(behavior_dataset.initial_states.shape)
     
@@ -247,6 +248,27 @@ def main(_):
                                env.action_spec(),
                                FLAGS.lr, FLAGS.weight_decay)
 
+  def get_laser_scan(states):
+    xy = states[:, -2:]
+    #print(xy.shape)
+    #print(xy[0])
+    theta = states[:, -3]
+    theta = tf.expand_dims(theta, axis=-1)
+    joined = tf.concat([xy, theta], axis=-1)
+    # convert to numpy array
+    joined = joined.numpy()
+    all_scans = []
+    for pose in joined:
+      scan = F110Env.sim.agents[0].scan_simulator.scan(pose,None)[::subsample_laser]
+      # print dtype of scan
+      # print(scan.dtype)
+      # scan to float32
+      scan = scan.astype(np.float32)
+      all_scans.append(scan)
+    # tensorflow array of shape (batch_size, 108)
+    all_scans = tf.convert_to_tensor(all_scans)
+    # print(all_scans.shape)
+    return all_scans
   #@tf.function
   def get_target_actions(states, batch_size=5000):
     # now we need to offload to cpu and to numpy
@@ -258,13 +280,16 @@ def main(_):
     for i in range(num_batches):
       start_idx = i * batch_size
       end_idx = min((i + 1) * batch_size, len(states))
-      batch_states_unnorm = states[start_idx:end_idx]
-      #batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
+      batch_states = states[start_idx:end_idx]
+      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
       #batch_states_unnorm = batch_states_unnorm.numpy()
       #print(batch_states_unnorm.shape)
       # print("---------------")
+      # need to convert the states to observations TODO!
+      laser_scan = get_laser_scan(batch_states_unnorm)
+
       batch_actions = actor(
-        batch_states_unnorm,
+        laser_scan,
         std=FLAGS.target_policy_std)[1]
       actions_list.append(batch_actions)
     #actions = np.concatenate(actions_list, axis=0)
@@ -285,11 +310,14 @@ def main(_):
       batch_states = states[start_idx:end_idx]
       batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
       # Extract the current batch of actions
+      laser_scans = get_laser_scan(batch_states_unnorm)
+
+
       batch_actions = actions[start_idx:end_idx]
       # Compute log_probs for the current batch
       
       batch_log_probs = actor(
-          batch_states_unnorm,
+          laser_scans,
           actions=batch_actions,
           std=FLAGS.target_policy_std)[2]
       
@@ -317,20 +345,18 @@ def main(_):
     # start = time.time()
     (states, actions, next_states, rewards, masks, weights,
      _) = next(tf_dataset_iter)
-    # time this
-    
-    initial_actions = get_target_actions(behavior_dataset.initial_states)
-    next_actions = get_target_actions(next_states)
-    #end = time.time()
-    #print("Time to get target actions: ", end-start)
-    # start = time.time()
+
     if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
+      next_actions = get_target_actions(next_states)
+
       model.update(states, actions, next_states, next_actions, rewards, masks,
                    weights, FLAGS.discount, min_reward, max_reward)
     elif 'mb' in FLAGS.algo:
       model.update(states, actions, next_states, rewards, masks,
                    weights)
     elif 'dual_dice' in FLAGS.algo:
+      initial_actions = get_target_actions(behavior_dataset.initial_states)
+      next_actions = get_target_actions(next_states)
       model.update(behavior_dataset.initial_states, initial_actions,
                    behavior_dataset.initial_weights, states, actions,
                    next_states, next_actions, masks, weights, FLAGS.discount)
