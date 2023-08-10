@@ -170,7 +170,7 @@ def main(_):
         flatten_trajectories=True,
         subsample_laser=10,
         padd_trajectories=False,
-        max_trajectories = 10,
+        max_trajectories = None,
          **dict(name='f110_with_dataset-v0',
                 map="/app/ws/example_map", 
                 map_ext=".png", 
@@ -248,7 +248,7 @@ def main(_):
                                FLAGS.lr, FLAGS.weight_decay)
 
   #@tf.function
-  def get_target_actions(states, batch_size=100):
+  def get_target_actions(states, batch_size=5000):
     # now we need to offload to cpu and to numpy
     # add batching to this
     # print(states.shape)
@@ -313,16 +313,17 @@ def main(_):
 
   #@tf.function
   def update_step():
+    import time
+    # start = time.time()
     (states, actions, next_states, rewards, masks, weights,
      _) = next(tf_dataset_iter)
     # time this
-    import time
-    start = time.time()
+    
     initial_actions = get_target_actions(behavior_dataset.initial_states)
     next_actions = get_target_actions(next_states)
-    end = time.time()
-    print("Time to get target actions: ", end-start)
-    
+    #end = time.time()
+    #print("Time to get target actions: ", end-start)
+    # start = time.time()
     if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
       model.update(states, actions, next_states, next_actions, rewards, masks,
                    weights, FLAGS.discount, min_reward, max_reward)
@@ -336,7 +337,8 @@ def main(_):
 
     if 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
       behavior.update(states, actions, weights)
-
+    end = time.time()
+    # print("Time to update model: ", end-start)
   gc.collect()
 
   for i in tqdm.tqdm(range(FLAGS.num_updates), desc='Running Training',  mininterval=30.0):
