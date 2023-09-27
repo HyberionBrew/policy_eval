@@ -251,3 +251,42 @@ class TrifingerWrapper(gym.Wrapper):
   
   def action_spec(self):
       return self.action_space 
+  
+
+import matplotlib.pyplot as plt
+import numpy as np
+def plot_reward_heatmap(normalized_obs, rewards, bins=10, name="reward_heatmap"):
+    """
+    Plots a heatmap-like visualization of average rewards based on binned x, y coordinates.
+
+    Args:
+    - normalized_obs (np.array): Array with shape (len, 9) where (:,0) is x and (:,1) is y.
+    - rewards (np.array): Array with rewards of same length as normalized_obs.
+    - bins (int or list): Number of bins or a list of bin edges for the histogram.
+    """
+    plt.figure()
+    # Bin the x and y coordinates
+    x_bins = np.linspace(normalized_obs[:,0].min(), normalized_obs[:,0].max(), bins)
+    y_bins = np.linspace(normalized_obs[:,1].min(), normalized_obs[:,1].max(), bins)
+    
+    bin_indices = np.digitize(normalized_obs[:,0], x_bins) - 1
+    bin_jndices = np.digitize(normalized_obs[:,1], y_bins) - 1
+    
+    reward_map = np.zeros((bins, bins))
+    count_map = np.zeros((bins, bins))
+    
+    for i, j, reward in zip(bin_indices, bin_jndices, rewards):
+        # print(i,j,reward)
+        reward_map[i, j] += reward
+        count_map[i, j] += 1
+    
+    # Avoid division by zero
+    count_map[count_map == 0] = 1
+    avg_reward_map = reward_map / count_map
+    
+    plt.imshow(avg_reward_map, origin='lower', extent=[x_bins[0], x_bins[-1], y_bins[0], y_bins[-1]], vmin=-0.5,vmax=5.0)#,vmin=-0.1, vmax=0.1)
+    plt.colorbar(label='Average Reward')
+    plt.xlabel('X Coordinate')
+    plt.ylabel('Y Coordinate')
+    plt.title('Average Reward Heatmap')
+    plt.savefig(f"{name}.png")

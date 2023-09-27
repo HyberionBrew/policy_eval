@@ -153,5 +153,22 @@ class QFitter(object):
     """
     initial_actions = get_action(initial_states)
     preds = self(initial_states, initial_actions)
-    return (tf.reduce_sum(preds * initial_weights) /
+    # print(preds)
+    weighted_mean = (tf.reduce_sum(preds * initial_weights) /
             tf.reduce_sum(initial_weights))
+    weighted_variance = tf.reduce_sum(initial_weights * tf.square(preds - weighted_mean)) / tf.reduce_sum(initial_weights)
+    weighted_stddev = tf.sqrt(weighted_variance)
+    return weighted_mean, weighted_stddev
+  
+  def estimate_returns_unweighted(self, initial_states,
+      get_action):
+      initial_actions = get_action(initial_states)
+      preds = self(initial_states, initial_actions)
+      return preds
+  def save(self, path):
+    self.critic.save(path + '/critic')
+    self.critic_target.save(path + '/critic_target')
+    
+  def load(self, path):
+    tf.keras.models.load_model(path + '/critic_target')
+    tf.keras.models.load_model(path + '/critic')

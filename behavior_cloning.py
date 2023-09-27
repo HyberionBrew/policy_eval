@@ -36,6 +36,9 @@ class BehaviorCloning(object):
       learning_rate: Learning rate.
       weight_decay: Weight decay.
     """
+    # print("definitions")
+    # print(state_dim)
+    # print(action_spec)
     self.actor = actor_lib.Actor(state_dim, action_spec)
     self.action_spec = action_spec
     self.optimizer = tfa_optimizers.AdamW(learning_rate=learning_rate,
@@ -70,6 +73,9 @@ class BehaviorCloning(object):
       tape.watch(self.actor.trainable_variables)
       actions = tf.clip_by_value(actions, 1e-4 + self.action_spec.low,
                                  -1e-4 + self.action_spec.high)
+      #print("shapes")
+      #print(states.shape)
+      #print(actions.shape)
       log_prob = self.actor.get_log_prob(states, actions)
       actor_loss = (
           tf.reduce_sum(-log_prob * weights) /

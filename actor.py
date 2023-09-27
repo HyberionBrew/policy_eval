@@ -77,7 +77,8 @@ class Actor(tf.keras.Model):
     else:
       # Ugly hack
       std = tf.stop_gradient(mu) * 0.0 + std
-
+    #print("ad")
+    #print(self.action_mean)
     dist = tfd.TransformedDistribution(
         tfd.Sample(
             tfd.Normal(tf.zeros(mu.shape[:-1]), 1.0),
@@ -109,6 +110,8 @@ class Actor(tf.keras.Model):
       Log probabilities of actions.
     """
     dist, _ = self.get_dist_and_mode(states, std)
+    #print(dist)
+    #print(actions.shape)
     log_probs = dist.log_prob(actions)
     return log_probs
 

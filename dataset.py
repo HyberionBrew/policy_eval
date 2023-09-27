@@ -115,6 +115,7 @@ class Dataset(object):
             np.concatenate(dataset['trajectories'][k], axis=0))
 
     self.states = dataset['states']
+    print(self.states[:2])
     self.actions = dataset['actions']
     self.next_states = dataset['next_states']
     self.masks = dataset['masks']
@@ -169,8 +170,8 @@ class Dataset(object):
 
   def with_uniform_sampling(self, sample_batch_size):
     return tf.data.Dataset.from_tensor_slices(
-        (self.states, self.actions, self.next_states, self.rewards, self.masks,
-        self.weights, self.steps)).repeat().shuffle(
+        (self.states, self.scans, self.actions, self.next_states,self.next_scans, self.rewards, self.masks,
+        self.weights, self.log_probs)).repeat().shuffle(
             self.states.shape[0], reshuffle_each_iteration=True).batch(
                 sample_batch_size, drop_remainder=True).apply(
       tf.data.experimental.copy_to_device("/gpu:0")).prefetch(tf.data.AUTOTUNE)
@@ -273,7 +274,7 @@ class D4rlDataset(Dataset):
               assert len(v) == len(trajectory['actions'])
               dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
             # print every 200 trajectories
-            if len(dataset['trajectories']['actions']) % 200 == 0:
+            if len(dataset['trajectories']['actions']) % 600 == 0:
               print('Added trajectory %d with length %d.' % (
                   len(dataset['trajectories']['actions']),
                   len(trajectory['actions'])))
@@ -322,6 +323,7 @@ class D4rlDataset(Dataset):
               np.concatenate(dataset['trajectories'][k], axis=0))
 
       self.states = dataset['states']
+      print(self.states[:2])
       #print(self.states.device)
       self.actions = dataset['actions']
       #print(self.actions.device)
@@ -386,6 +388,8 @@ class F110Dataset(Dataset):
                bootstrap = True,
                debug=False, 
                path=None,
+               exclude_agents = [],
+               alternate_reward = False,
                scans_as_states=False):
     """Processes data from F110 environment.
 
@@ -407,9 +411,22 @@ class F110Dataset(Dataset):
               next_scans=[],
               next_states=[],
               rewards=[],
-              masks=[]))
+              index=[],
+              masks=[],
+              log_probs = []))
+      #print(path)
+      
       if path is not None:
-        d4rl_dataset = d4rl_env.get_dataset(zarr_path=path)
+        
+        d4rl_dataset = d4rl_env.get_dataset(zarr_path=path, 
+                                            without_agents=exclude_agents, 
+                                            alternate_reward = alternate_reward,
+                                            #remove_short_trajectories=True,
+                                            #split_trajectories=50,
+                                            #skip_inital=50,
+                                            min_trajectory_length=600,
+                                            )
+        print(d4rl_dataset.keys())
       else:
         d4rl_dataset = d4rl_env.get_dataset()
       dataset_length = len(d4rl_dataset['actions'])
@@ -417,33 +434,40 @@ class F110Dataset(Dataset):
       for idx in range(dataset_length):
         if new_trajectory:
           trajectory = dict(
-              states=[], scans=[], actions=[], next_states=[], next_scans=[], rewards=[], masks=[])
-
+              states=[], scans=[], actions=[], next_states=[], next_scans=[], rewards=[], masks=[], index=[], log_probs=[])
+        # print keys of d4rl_dataset
+        #print(d4rl_dataset.keys())
         trajectory['states'].append(d4rl_dataset['observations'][idx])
-        trajectory['scans'].append(d4rl_dataset['scan'][idx])
+        trajectory['scans'].append(d4rl_dataset['scans'][idx])
+        trajectory['index'].append(d4rl_dataset['index'][idx])
         trajectory['actions'].append(d4rl_dataset['actions'][idx])
         trajectory['rewards'].append(d4rl_dataset['rewards'][idx])
+        trajectory['log_probs'].append(d4rl_dataset['log_probs'][idx])
         trajectory['masks'].append(1.0 - d4rl_dataset['terminals'][idx])
         if not new_trajectory:
-          # Significant BUG!????
           trajectory['next_states'].append(d4rl_dataset['observations'][idx])
-          trajectory['next_scans'].append(d4rl_dataset['scan'][idx])
+          trajectory['next_scans'].append(d4rl_dataset['scans'][idx])
 
         end_trajectory = (d4rl_dataset['terminals'][idx] or
                           d4rl_dataset['timeouts'][idx])
         if end_trajectory:
           trajectory['next_states'].append(d4rl_dataset['observations'][idx])
-          trajectory['next_scans'].append(d4rl_dataset['scan'][idx])
+          trajectory['next_scans'].append(d4rl_dataset['scans'][idx])
 
           if d4rl_dataset['timeouts'][idx] and not d4rl_dataset['terminals'][idx]:
             for key in trajectory:
               del trajectory[key][-1]
           if trajectory['actions']:
+            #print(trajectory['actions'])
+            #print("2-----")
+            #print(trajectory.items())
             for k, v in trajectory.items():
+              #print(len(v))
+              #print(len(trajectory['actions']))
               assert len(v) == len(trajectory['actions'])
               dataset['trajectories'][k].append(np.array(v, dtype=np.float32))
             # print every 200 trajectories
-            if len(dataset['trajectories']['actions']) % 200 == 0:
+            if len(dataset['trajectories']['actions']) % 600 == 0:
               print('Added trajectory %d with length %d.' % (
                   len(dataset['trajectories']['actions']),
                   len(trajectory['actions'])))
@@ -451,7 +475,7 @@ class F110Dataset(Dataset):
               print('Added trajectory %d with length %d.' % (
                   len(dataset['trajectories']['actions']),
                   len(trajectory['actions'])))
-              # break
+              break
         new_trajectory = end_trajectory
 
       if noise_scale > 0.0:
@@ -497,25 +521,30 @@ class F110Dataset(Dataset):
               np.concatenate(dataset['trajectories'][k], axis=0))
 
       self.states = dataset['states']
+      print(self.states[:2])
+      self.index = dataset['index']
       self.scans = dataset['scans']
       self.next_scans = dataset['next_scans']
-      #print(self.states.device)
+      # print(self.states.device)
       self.actions = dataset['actions']
       #print(self.actions.device)
-      self.initial_scans = dataset['initial_scans']
+      # self.initial_scans = dataset['initial_scans']
       self.next_states = dataset['next_states']
       self.masks = dataset['masks']
       self.weights = dataset['weights']
       self.rewards = dataset['rewards']
+      self.log_probs = dataset['log_probs']
       self.steps = dataset['steps']
 
       self.initial_states = dataset['initial_states']
       self.initial_weights = dataset['initial_weights']
 
       if scans_as_states:
-        self.states = self.scans
-        self.next_states = self.next_scans
-        self.initial_states = self.initial_scans
+        # raise not impleemnted
+        raise NotImplementedError
+        #self.states = self.scans
+        #self.next_states = self.next_scans
+        #self.initial_states = self.initial_scans
 
       self.eps = eps
       self.model_filename = None

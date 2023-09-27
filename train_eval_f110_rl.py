@@ -15,27 +15,53 @@
 
 r"""Run off-policy evaluation training loop."""
 
+from absl import app
+from absl import flags
+from absl import logging
+from stable_baselines3 import PPO # this needs to be imported before tensorflow
+import tensorflow as tf
+from utils import plot_reward_heatmap
+gpu_memory = 12209 # GPU memory available on the machine
+# 45% of the memory, this way we can launch a second process on the same GPU
+allowed_gpu_memory = gpu_memory * 0.25
+gpus = tf.config.experimental.list_physical_devices('GPU')
+
+if gpus:
+  try:
+      tf.config.experimental.set_virtual_device_configuration(
+          gpus[0],
+          [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=allowed_gpu_memory)])
+  except RuntimeError as e:
+      print(e)
+print("set gpu memory limit to", allowed_gpu_memory)
+"""
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
+"""
 import gc
 import json
 import os
 import pickle
-from absl import app
 
+print	("hi")
 import sys
 # sys.path.append("/mnt/hdd2/fabian/demo/ws_ope/policy_eval")
 
-from absl import flags
-from absl import logging
+
 # import d4rl  # pylint: disable=unused-import
-import gym
-#import trifinger_rl_datasets
 import f110_gym
 import f110_orl_dataset
-from f110_gym.envs.base_classes import Integrator
+import gymnasium as gym
 
-from gym.wrappers import time_limit
+print	("hi")
+from gymnasium.wrappers import time_limit
 import numpy as np
-import tensorflow as tf
+
 # from tf_agents.environments import gym_wrapper
 # from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
@@ -52,30 +78,31 @@ from policy_eval.q_fitter import QFitter
 
 from ftg_agents.agents import *
 
+from f110_orl_dataset.normalize_dataset import Normalize
+from f110_orl_dataset.dataset_agents import F110Actor,F110Stupid
+
 import os
 import sys
-# import torch
+import torch
+
 
 EPS = np.finfo(np.float32).eps
 FLAGS = flags.FLAGS
-
-flags.DEFINE_string('env_name', 'trifinger-cube-push-real-mixed-v0',
-                    'Environment for training/evaluation.')
-
-flags.DEFINE_bool('trifinger', False, 'Whether to use Trifinger envs and datasets.')
+flags.DEFINE_string('env_name', 'f110_gym', 'Name of the environment.')
 flags.DEFINE_bool('f110', True, 'Whether to use Trifinger envs and datasets.')
-flags.DEFINE_string('target_policy', 'StochasticFTGAgent', 'Name of target agent')
+flags.DEFINE_string('target_policy', 'velocity', 'Name of target agent')
 flags.DEFINE_float('speed', 1.0, 'Mean speed of the car, for the agent') 
 #flags.DEFINE_string('d4rl_policy_filename', None,
 #                    'Path to saved pickle of D4RL policy.')
 #flags.DEFINE_string('trifinger_policy_class', "trifinger_rl_example.example.TorchPushPolicy",
 #                    'Policy class name for Trifinger.')
-flags.DEFINE_integer('seed', 0, 'Fixed random seed for training.')
-flags.DEFINE_float('lr', 3e-4, 'Critic learning rate.')
+flags.DEFINE_bool('load_mb_model', False, 'Whether to load a model-based model.')
+flags.DEFINE_integer('seed', 1, 'Fixed random seed for training.')
+flags.DEFINE_float('lr', 3e-5, 'Critic learning rate.')
 flags.DEFINE_float('weight_decay', 1e-5, 'Weight decay.')
 flags.DEFINE_float('behavior_policy_std', None,
                    'Noise scale of behavior policy.')
-flags.DEFINE_float('target_policy_std', 0.1, 'Noise scale of target policy.')
+flags.DEFINE_float('target_policy_std', 0.0, 'Noise scale of target policy.')
 flags.DEFINE_bool('target_policy_noisy', False, 'inject noise into the actions of the target policy')
 # flags.DEFINE_integer('num_trajectories', 1000, 'Number of trajectories.') # this is not actually used
 flags.DEFINE_integer('sample_batch_size', 256, 'Batch size.')
@@ -99,6 +126,10 @@ flags.DEFINE_boolean('bootstrap', True,
 flags.DEFINE_enum('algo', 'fqe', ['fqe', 'dual_dice', 'mb', 'iw', 'dr'],
                   'Algorithm for policy evaluation.')
 flags.DEFINE_float('noise_scale', 0.0, 'Noise scaling for data augmentation.') # 0.25
+flags.DEFINE_string('model_path', None, 'Path to saved model.')
+flags.DEFINE_bool('no_behavior_cloning', False, 'Whether to use behavior cloning')
+flags.DEFINE_bool('alternate_reward', False, 'Whether to use alternate reward')
+
 
 
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
@@ -113,15 +144,11 @@ def make_hparam_string(json_parameters=None, **hparam_str_dict):
 
 
 def main(_):
-  tf.random.set_seed(FLAGS.seed)
+  
   np.random.seed(FLAGS.seed)
   # assert not FLAGS.d4rl and FlAGS.trifinger
- 
 
-  gpu_memory = 12209 # GPU memory available on the machine
-  # 45% of the memory, this way we can launch a second process on the same GPU
-  allowed_gpu_memory = gpu_memory * 0.45 
-  
+  """
   gpus = tf.config.experimental.list_physical_devices('GPU')
   if gpus:
     try:
@@ -134,7 +161,9 @@ def main(_):
     except RuntimeError as e:
       # Virtual devices must be set before GPUs have been initialized
       print(e, " GPUs must be set at program startup")
-
+  
+  """
+  tf.random.set_seed(FLAGS.seed)
   # import f110
 
 
@@ -148,39 +177,18 @@ def main(_):
       target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, 'benchmark_f110', hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_926_test", hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.f110:
-    #from f110_gym.envs.datatset_env import F1tenthDatasetEnv
-    """ trifinger_env = utils.TrifingerWrapper(
-        FLAGS.env_name,
-        set_terminals=True,
-        flatten_obs=True,
-        image_obs=False,
-        visualization=False,  # enable visualization
-    ) # enable visualization """
-    # gym.make(, **kwargs)
-    subsample_laser = 10
+    subsample_laser = 20
     F110Env = gym.make('f110_with_dataset-v0',
-        # only terminals are available as of tight now 
-        set_terminals=True,
-        flatten_obs=True,
-        flatten_acts=True,
-        laser_obs=True,
-        flatten_trajectories=True,
-        subsample_laser=subsample_laser,
-        padd_trajectories=False,
-        max_trajectories = None,
-        progress_as_reward=True,
-         **dict(name='f110_with_dataset-v0',
-                map="/app/ws/ellipse_map2", 
-                map_ext=".pgm", 
-                num_agents=1, 
-                timestep=0.01, 
-                integrator=Integrator.RK4)
-        )
-
+    # only terminals are available as of right now 
+        **dict(name='f110_with_dataset-v0',
+            config = dict(map="Infsaal", num_agents=1,
+            params=dict(vmin=0.5, vmax=2.0)),
+              render_mode="human")
+    )
     env = F110Env
     # print available classes of env
     print(env.observation_space)
@@ -192,9 +200,12 @@ def main(_):
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
-        debug=True,
-        path = "/app/ws/trajectories.zarr",
-        scans_as_states=False,)
+        debug=False,
+        path = "/app/ws/f1tenth_orl_dataset/data/trajectories.zarr",
+        exclude_agents = ['det'] + [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        scans_as_states=False,
+        alternate_reward=FLAGS.alternate_reward,)
+    
     print("Finished loading F110 Dataset")
     print(behavior_dataset.initial_states.shape)
   else:
@@ -204,119 +215,116 @@ def main(_):
   tf_dataset = behavior_dataset.with_uniform_sampling(FLAGS.sample_batch_size)
   tf_dataset_iter = iter(tf_dataset)
 
-  
-  if FLAGS.trifinger:
-    from trifinger_rl_datasets import PolicyBase
-    from trifinger_rl_datasets.evaluate_sim import load_policy_class
-    
-    Policy = load_policy_class(FLAGS.trifinger_policy_class)
-    policy_config = Policy.get_policy_config()
-    policy = Policy(env.action_space, env.observation_space, env.sim_env.episode_length)
-    actor = utils.TrifingerActor(policy, noisy=FLAGS.target_policy_noisy)
-    # print if actor is noisy or not
-    print("Actor is noisy: ", actor.noisy)
   if FLAGS.f110:
-    agents = {
-    'DeterministicFTGAgent': DeterministicFTGAgent,
-    'StochasticFTGAgent': StochasticFTGAgent,
-    'StochasticFTGAgentRandomSpeed': StochasticFTGAgentRandomSpeed, 
-    'StochasticFTGAgentDynamicSpeed': StochasticFTGAgentDynamicSpeed} #, 'FTGAgent': FTGAgent, 'PurePursuitAgent': PurePursuitAgent}
-    agent = agents[FLAGS.target_policy](env, 
-                                        sub_sample_input=False,
-                                        sub_sample=10, 
-                                        speed=FLAGS.speed)
-    actor = agent
+    # model = PPO.load(FLAGS.model_path)
+    # print("yo")
+    actor = F110Actor(FLAGS.target_policy, deterministic=False) #F110Stupid()
+    model_input_normalizer = Normalize()
+    # print("no")
+    # actor = model
   else:
     # Throw unsupported error
     raise NotImplementedError
 
   if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
     print("SPEC", behavior_dataset.states.shape[1])
-    model = QFitter( behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
-                    env.action_spec().shape[0], FLAGS.lr, FLAGS.weight_decay,
+    print(env.action_spec().shape)
+    model = QFitter(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
+                    env.action_spec().shape[1], FLAGS.lr, FLAGS.weight_decay,
                     FLAGS.tau)
+
   elif 'mb' in FLAGS.algo:
     model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
-                       env.action_spec().shape[0], learning_rate=FLAGS.lr,
+                       env.action_spec().shape[1], learning_rate=FLAGS.lr,
                        weight_decay=FLAGS.weight_decay)
+    if FLAGS.load_mb_model:
+      model.load("/app/ws/logdir/mb/mb_model_250000")
   elif 'dual_dice' in FLAGS.algo:
     model = DualDICE(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
-                     env.action_spec().shape[0], FLAGS.weight_decay)
+                     env.action_spec().shape[1], FLAGS.weight_decay)
   if 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
-    behavior = BehaviorCloning(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
-                               env.action_spec(),
-                               FLAGS.lr, FLAGS.weight_decay)
-
-  def get_laser_scan(states):
-    xy = states[:, -2:]
-    #print(xy.shape)
-    #print(xy[0])
-    theta = states[:, -3]
-    theta = tf.expand_dims(theta, axis=-1)
-    joined = tf.concat([xy, theta], axis=-1)
-    # convert to numpy array
-    joined = joined.numpy()
-    all_scans = []
-    for pose in joined:
-      scan = F110Env.sim.agents[0].scan_simulator.scan(pose,None)[::subsample_laser]
-      # print dtype of scan
-      # print(scan.dtype)
-      # scan to float32
-      scan = scan.astype(np.float32)
-      all_scans.append(scan)
-    # tensorflow array of shape (batch_size, 108)
-    all_scans = tf.convert_to_tensor(all_scans)
-    # print(all_scans.shape)
-    return all_scans
+    if FLAGS.no_behavior_cloning:
+      behavior = None
+    else:
+      action_spec = gym.spaces.Box(low=np.asarray([-1.0,-1.0]),high=np.asarray([1.0,1.0]),shape=(2,))
+      behavior = BehaviorCloning(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
+                                action_spec,
+                                FLAGS.lr, FLAGS.weight_decay)
+    
   #@tf.function
-  def get_target_actions(states, batch_size=5000):
-    # now we need to offload to cpu and to numpy
-    # add batching to this
-    # print(states.shape)
-    # exit()
+  #@tf.function
+  def get_target_actions(states, scans= None, batch_size=5000):
     num_batches = int(np.ceil(len(states) / batch_size))
     actions_list = []
+    # batching, s.t. we dont run OOM
     for i in range(num_batches):
       start_idx = i * batch_size
       end_idx = min((i + 1) * batch_size, len(states))
       batch_states = states[start_idx:end_idx]
+
+      # unnormalize from the dope dataset normalization
       batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
-      #batch_states_unnorm = batch_states_unnorm.numpy()
-      #print(batch_states_unnorm.shape)
-      # print("---------------")
-      # need to convert the states to observations TODO!
-      laser_scan = get_laser_scan(batch_states_unnorm)
+      batch_states_unnorm = batch_states_unnorm.numpy()
+
+      # get scans
+      if scans is not None:
+        laser_scan = scans[start_idx:end_idx]
+      else:
+        laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+        laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
+
+      # back to dict
+      model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
+      # normalize back to model input
+      model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
+     
+      # now also append the laser scan
+      model_input_dict['lidar_occupancy'] = laser_scan
 
       batch_actions = actor(
-        laser_scan,
+        model_input_dict,
         std=FLAGS.target_policy_std)[1]
+      
       actions_list.append(batch_actions)
-    #actions = np.concatenate(actions_list, axis=0)
-    # tf concact
+
     actions = tf.concat(actions_list, axis=0)
-    #actions = tf.convert_to_tensor(actions)
+    actions = tf.convert_to_tensor(actions)
     return actions
 
   #@tf.function
-  def get_target_logprobs(states, actions, batch_size=5000):
+  def get_target_logprobs(states, actions, scans=None, batch_size=5000):
     num_batches = int(np.ceil(len(states) / batch_size))
     log_probs_list = []
+    # print(num_batches)
     for i in range(num_batches):
+      # print(i)
       # Calculate start and end indices for the current batch
       start_idx = i * batch_size
       end_idx = min((i + 1) * batch_size, len(states))
       # Extract the current batch of states
       batch_states = states[start_idx:end_idx]
       batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
-      # Extract the current batch of actions
-      laser_scans = get_laser_scan(batch_states_unnorm)
-
-
-      batch_actions = actions[start_idx:end_idx]
-      # Compute log_probs for the current batch
       
+      # Extract the current batch of actions
+      batch_actions = actions[start_idx:end_idx]
+
+      # get scans
+      if scans is not None:
+        laser_scan = scans[start_idx:end_idx]
+      else:
+        laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+        laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
+
+      # back to dict
+      model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
+      # normalize back to model input
+      model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
+      # now also append the laser scan
+      model_input_dict['lidar_occupancy'] = laser_scan
+
+      # Compute log_probs for the current batch
       batch_log_probs = actor(
-          laser_scans,
+          model_input_dict,
           actions=batch_actions,
           std=FLAGS.target_policy_std)[2]
       
@@ -331,6 +339,7 @@ def main(_):
     
     # Convert to TensorFlow tensor
     log_probs = tf.convert_to_tensor(log_probs)
+    #print("log_probs", log_probs.shape)
     return log_probs
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
@@ -342,18 +351,37 @@ def main(_):
   def update_step():
     import time
     # start = time.time()
-    (states, actions, next_states, rewards, masks, weights,
-     _) = next(tf_dataset_iter)
+    # (self.states, self.scans, self.actions, self.next_states,self.next_scans, 
+    # self.rewards, self.masks,
+    #     self.weights, self.log_prob)
+    (states, scans, actions, next_states, next_scans, rewards, masks, weights,
+     log_prob) = next(tf_dataset_iter)
+    # print("max_trajectory_length ", np.max(behavior_dataset.steps) + 1)
+    #print("--------")
+    #print("scan on record", scans[:2])
+    # get_target_actions(sta)
+    #print(".........")
+    #states = 
+    #print(states[:2])
+    # print("action dataset:", actions[:2].shape)
+    #actions = get_target_actions(states[:2], scans=scans[:2])
+    #log_prob = get_target_logprobs(states[:2], actions[:2], scans=scans[:2])
+    #print("action infered:", actions)
+    #print("log_prob infered:", log_prob)
+    #exit()
     # print(rewards.shape)
     # print(rewards[0])
-    if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
-      next_actions = get_target_actions(next_states)
+    if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo or 'hybrid' in FLAGS.algo:
+      next_actions = get_target_actions(next_states, scans=next_scans)
 
       model.update(states, actions, next_states, next_actions, rewards, masks,
                    weights, FLAGS.discount, min_reward, max_reward)
-    elif 'mb' in FLAGS.algo:
-      model.update(states, actions, next_states, rewards, masks,
+      
+    elif 'mb' in FLAGS.algo or 'hybrid' in FLAGS.algo:
+      if not(FLAGS.load_mb_model):
+        model.update(states, actions, next_states, rewards, masks,
                    weights)
+
     elif 'dual_dice' in FLAGS.algo:
       initial_actions = get_target_actions(behavior_dataset.initial_states)
       next_actions = get_target_actions(next_states)
@@ -362,7 +390,15 @@ def main(_):
                    next_states, next_actions, masks, weights, FLAGS.discount)
 
     if 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
-      behavior.update(states, actions, weights)
+      if FLAGS.no_behavior_cloning:
+        pass
+      else:
+        # print(states.shape)
+        # print(actions.shape)
+        #actions_behavior = tf.expand_dims(actions, axis=1)
+        #print(states.shape)
+        #print(actions_behavior.shape)
+        behavior.update(states, actions, weights)
     end = time.time()
     # print("Time to update model: ", end-start)
   gc.collect()
@@ -372,43 +408,134 @@ def main(_):
 
     if i % FLAGS.eval_interval == 0:
       if 'fqe' in FLAGS.algo:
-        pred_returns = model.estimate_returns(behavior_dataset.initial_states,
+        pred_returns,_ = model.estimate_returns(behavior_dataset.initial_states,
                                               behavior_dataset.initial_weights,
                                               get_target_actions)
+        if (i % FLAGS.eval_interval*2) == 0:
+          model.save(f"/app/ws/logdir/{FLAGS.target_policy}/fqe_model_{i}")
+      elif 'hybrid' in FLAGS.algo:
+          """
+          forward_inital_states = mb_model.sim_steps(
+            behavior_dataset.states,
+            get_target_actions,
+            FLAGS.discount,
+            min_state, max_state, 
+            horizon= 50,
+          )
+          pred_returns,_ = fqe_model.estimate_returns(forward_inital_states,
+                                              behavior_dataset.initial_weights,
+                                              get_target_actions)
+          
+          """
       elif 'mb' in FLAGS.algo:
+        horizon = 600
+        print("Getting rewards")
+        """
+        get_rewards = model.get_rewards(behavior_dataset.states,
+                                behavior_dataset.initial_weights,
+                                    get_target_actions,
+                                    FLAGS.discount,
+                                    min_reward, max_reward,
+                                    min_state, max_state, 
+                                    horizon= horizon)#np.max(behavior_dataset.steps) + 1)
+        rewards_states = model.compute_rewards_for_states(behavior_dataset.states,
+                                         get_target_actions)
+        plot_reward_heatmap(behavior_dataset.states.cpu().numpy()[::1000], 
+                            rewards_states, 
+                            bins=150, 
+                            name=f"logdir/plts/mb/mb_pure_rewards_{FLAGS.target_policy}_{FLAGS.discount}_{i}")
+        """
+
+
+
+       
+        
+  	    # print("Plotting rollouts")
+        model.plot_rollouts(behavior_dataset.states,
+                            behavior_dataset.initial_weights,
+                            get_target_actions,
+                            FLAGS.discount,
+                            min_reward, max_reward,
+                            min_state, max_state, 
+                            horizon= 600,
+                            path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}.png")#np.max(behavior_dataset.steps) + 1)
+        
+        print("got rewards")
+        # print(get_rewards.shape)
+        #plot_reward_heatmap(behavior_dataset.states.cpu().numpy(), 
+        #                    get_rewards.cpu().numpy(), 
+        #                    bins=150, name=f"logdir/plts/mb/mb_{FLAGS.target_policy}_{FLAGS.discount}_{i}")
+        print("pred returns")
         pred_returns = model.estimate_returns(behavior_dataset.initial_states,
                                               behavior_dataset.initial_weights,
                                               get_target_actions,
                                               FLAGS.discount,
                                               min_reward, max_reward,
-                                              min_state, max_state)
+                                              min_state, max_state, 
+                                              horizon= horizon)#np.max(behavior_dataset.steps) + 1)
+        
+        # have estimate for 50 timesteps? but only count the last 30? 
+        """
+        pred_mean_returns, pred_std_returns = model.estimate_mean_returns(behavior_dataset.initial_states,
+                                                                          behavior_dataset.initial_weights,
+                                                                          get_target_actions,
+                                                                          FLAGS.discount,
+                                                                          min_reward, max_reward,
+                                                                          min_state, max_state, 
+                                                                          horizon= 50, 
+                                                                          settle_timesteps = 20)  
+        tf.summary.scalar('train/pred mean returns (MB)', pred_mean_returns, step=i)
+        tf.summary.scalar('train/pred std returns (MB)', pred_std_returns, step=i)
+        """
+        model.save(f"/app/ws/logdir/mb/mb_model_{i}")
+
       elif FLAGS.algo in ['dual_dice']:
         pred_returns, pred_ratio = model.estimate_returns(iter(tf_dataset))
 
         tf.summary.scalar('train/pred ratio', pred_ratio, step=i)
       elif 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
         discount = FLAGS.discount
-        _, behavior_log_probs = behavior(behavior_dataset.states,
-                                         behavior_dataset.actions)
+        if FLAGS.no_behavior_cloning:
+          behavior_log_probs = behavior_dataset.log_probs
+        else:
+          _, behavior_log_probs = behavior(behavior_dataset.states,
+                                          behavior_dataset.actions)
+        print("target log probs")
         target_log_probs = get_target_logprobs(behavior_dataset.states,
-                                               behavior_dataset.actions)
+                                               behavior_dataset.actions,
+                                               scans=behavior_dataset.scans)
+        
+        print("got target_log_probs")
+        # print(target_log_probs.shape)
         offset = 0.0
         rewards = behavior_dataset.rewards
         if 'dr' in FLAGS.algo:
           # Doubly-robust is effectively the same as importance-weighting but
           # transforming rewards at (s,a) to r(s,a) + gamma * V^pi(s') -
           # Q^pi(s,a) and adding an offset to each trajectory equal to V^pi(s0).
-          offset = model.estimate_returns(behavior_dataset.initial_states,
+          print("estimating returns")
+          offset, std_deviation = model.estimate_returns(behavior_dataset.initial_states,
                                           behavior_dataset.initial_weights,
                                           get_target_actions)
+          all_returns = model.estimate_returns_unweighted(behavior_dataset.states, get_target_actions)
+          model.save(f"/app/ws/logdir/{FLAGS.target_policy}/fqe_model_{i}")
+          # save image of 
+          tf.summary.scalar('train/pred returns (fqe)', behavior_dataset.unnormalize_rewards(offset), step=i)
+          tf.summary.scalar('std_deviation returns (fqe)', behavior_dataset.unnormalize_rewards(std_deviation), step=i)
+          plot_reward_heatmap(behavior_dataset.states.cpu().numpy(), all_returns.cpu().numpy(), bins=150, name=f"logdir/plts/fqe_{i}_{FLAGS.target_policy}_{FLAGS.discount}")
+          print("fqe std_deviation", behavior_dataset.unnormalize_rewards(std_deviation))
+          #print("q values")
           q_values = (model(behavior_dataset.states, behavior_dataset.actions) /
                       (1 - discount))
+          #print("got q_vals")
           n_samples = 10
-          next_actions = [get_target_actions(behavior_dataset.next_states)
+          next_actions = [get_target_actions(behavior_dataset.next_states, scans=behavior_dataset.next_scans)
                           for _ in range(n_samples)]
+          #print("next q_vals")
           next_q_values = sum(
               [model(behavior_dataset.next_states, next_action) / (1 - discount)
                for next_action in next_actions]) / n_samples
+          print("got next q_vals")
           rewards = rewards + discount * next_q_values - q_values
 
         # Now we compute the self-normalized importance weights.
@@ -460,5 +587,8 @@ def main(_):
       tf.summary.scalar('train/pred returns', pred_returns, step=i)
       logging.info('pred returns=%f', pred_returns)
 
+
+app.run(main)
 if __name__ == '__main__':
+  print("Running main")
   app.run(main)

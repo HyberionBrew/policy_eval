@@ -19,6 +19,9 @@ from tensorflow_addons import optimizers as tfa_optimizers
 import tensorflow_probability as tfp
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+
 class ForwardModel(tf.keras.Model):
   """A class that implement a forward model."""
 
@@ -152,6 +155,172 @@ class ModelBased(object):
                         step=self.reward_optimizer.iterations)
       tf.summary.scalar('train/done_loss', done_loss,
                         step=self.done_optimizer.iterations)
+  def save(self, path):
+    """Saves the model.
+
+    Args:
+      path: Path to save the model.
+    """
+    self.dynamics_net.save_weights(path + '/dynamics_net')
+    self.rewards_net.save_weights(path + '/rewards_net')
+    self.done_net.save_weights(path + '/done_net')
+  def load(self, path):
+    """Loads the model.
+
+    Args:
+      path: Path to load the model.
+    """
+    self.dynamics_net.load_weights(path + '/dynamics_net')
+    self.rewards_net.load_weights(path + '/rewards_net')
+    self.done_net.load_weights(path + '/done_net')
+  
+  def get_rewards(self, states, 
+                  weights, 
+                  get_action, 
+                  discount,   
+                  min_reward,
+                       max_reward,
+                       min_state,
+                       max_state,
+                       clip=True,
+                       horizon=1000):
+    """Compute returns via rollouts.
+    """
+    returns = 0
+    states = states
+
+    masks = tf.ones((states.shape[0],), dtype=tf.float32)
+    # do a plot of the trajectory taken by the agent where states[:,0] and states[:,1] are the x and y coordinates of the agent
+    for i in range(horizon):
+      # print("i", i)
+      actions = get_action(states)
+
+      pred_rewards = self.rewards_net(states, actions)
+      if clip:
+        pred_rewards = tf.clip_by_value(pred_rewards, min_reward,
+                                        max_reward)
+      logits = self.done_net(states, actions)
+      # print(logits.shape)
+      mask_dist = tfp.distributions.Bernoulli(logits=logits)
+      masks *= tf.cast(mask_dist.sample(), tf.float32)
+
+      returns += (discount**i) * masks * pred_rewards
+
+      states = self.dynamics_net(states, actions)
+      if clip:
+        states = tf.clip_by_value(states, min_state, max_state)
+
+      return returns
+  
+  def compute_rewards_for_states(self, states, get_action):
+      actions = get_action(states)
+      rewards = self.rewards_net(states, actions)
+      return rewards.numpy()
+  
+  def plot_rollouts(self, states, 
+                      weights, 
+                      get_action, 
+                      discount,   
+                      min_reward,
+                      max_reward,
+                      min_state,
+                      max_state,
+                      clip=True,
+                      horizon=1000,
+                      path="logdir/plts/mb/rollouts_mb.png"):
+        num_samples = 20
+        # sampled_indices = tf.random.shuffle(tf.range(states.shape[0]))[:num_samples]
+        # sampled_indices = states[:num_samples]
+        sampled_indices = np.linspace(0, states.shape[0]-1, num_samples, dtype=int)
+        sampled_states = tf.gather(states, sampled_indices)
+        
+        plt.figure(figsize=(12, 6))
+        colors = plt.cm.jet(np.linspace(0, 1, num_samples))  # Get 10 different colors
+        # Plot all states as a grey background
+        plt.scatter(states[:, 0], states[:, 1], color='grey', s=5, label='All states', alpha=0.5)
+
+        for idx in range(num_samples):
+            state_trajectory = [sampled_states[idx][:2].numpy()]  # start with the sampled state
+            current_state = sampled_states[idx:idx+1, :]
+            masks = tf.ones((1,), dtype=tf.float32)
+            returns = 0
+            # Plot "x" at the starting state
+            plt.scatter(state_trajectory[0][0], state_trajectory[0][1], color=colors[idx], marker='x', s=60, label=f'Start {idx + 1}')
+            for i in range(horizon):
+                actions = get_action(current_state)
+
+                pred_rewards = self.rewards_net(current_state, actions)
+                # print(pred_rewards)
+                if clip:
+                    pred_rewards = tf.clip_by_value(pred_rewards, min_reward, max_reward)
+
+                logits = self.done_net(current_state, actions)
+                # print(logits)
+                mask_dist = tfp.distributions.Bernoulli(logits=logits)
+                masks *= tf.cast(mask_dist.sample(), tf.float32)
+                
+                returns += (discount**i) * masks * pred_rewards
+
+                current_state = self.dynamics_net(current_state, actions)
+                if clip:
+                    current_state = tf.clip_by_value(current_state, min_state, max_state)
+
+                # Collect x, y for plotting
+                state_trajectory.append(current_state[0, :2].numpy())
+            # print(f"{idx} : {returns}")
+            x_coords, y_coords = zip(*state_trajectory)
+            plt.plot(x_coords, y_coords, label=f"Sample {idx + 1}", color=colors[idx])
+
+        plt.title("Rollouts for Sampled States")
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.legend()
+        # save the image
+        plt.savefig(path)
+
+  def estimate_mean_returns(self,
+                            initial_states,
+                       weights,
+                       get_action,
+                       discount,
+                       min_reward,
+                       max_reward,
+                       min_state,
+                       max_state,
+                       clip=True,
+                       horizon=1000,
+                       settle_timesteps=40):
+    """Compute mean returns via rollouts.
+    """
+    returns = 0
+    states = initial_states
+
+    masks = tf.ones((initial_states.shape[0],), dtype=tf.float32)
+
+    for i in range(horizon):
+      # print("i", i)
+      actions = get_action(states)
+
+      pred_rewards = self.rewards_net(states, actions)
+      if clip:
+        pred_rewards = tf.clip_by_value(pred_rewards, min_reward,
+                                        max_reward)
+      logits = self.done_net(states, actions)
+      mask_dist = tfp.distributions.Bernoulli(logits=logits)
+      masks *= tf.cast(mask_dist.sample(), tf.float32)
+
+      if i >= settle_timesteps:
+        returns += masks * pred_rewards
+
+      states = self.dynamics_net(states, actions)
+      
+      if clip:
+        states = tf.clip_by_value(states, min_state, max_state)
+    print("pred returns, raw", tf.reduce_sum(
+        weights * returns) / tf.reduce_sum(weights))
+    
+    return tf.reduce_sum(weights * returns) / (tf.reduce_sum(weights))
+
 
   def estimate_returns(self,
                        initial_states,
@@ -187,6 +356,7 @@ class ModelBased(object):
     masks = tf.ones((initial_states.shape[0],), dtype=tf.float32)
 
     for i in range(horizon):
+      # print("i", i)
       actions = get_action(states)
 
       pred_rewards = self.rewards_net(states, actions)
@@ -202,5 +372,8 @@ class ModelBased(object):
       states = self.dynamics_net(states, actions)
       if clip:
         states = tf.clip_by_value(states, min_state, max_state)
+    print("pred returns, raw", tf.reduce_sum(
+        weights * returns) / tf.reduce_sum(weights))
     return tf.reduce_sum(
         weights * returns) / tf.reduce_sum(weights) * (1 - discount)
+
