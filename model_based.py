@@ -280,47 +280,53 @@ class ModelBased(object):
 
   def estimate_mean_returns(self,
                             initial_states,
-                       weights,
-                       get_action,
-                       discount,
-                       min_reward,
-                       max_reward,
-                       min_state,
-                       max_state,
-                       clip=True,
-                       horizon=1000,
-                       settle_timesteps=40):
-    """Compute mean returns via rollouts.
-    """
-    returns = 0
-    states = initial_states
-
-    masks = tf.ones((initial_states.shape[0],), dtype=tf.float32)
-
-    for i in range(horizon):
-      # print("i", i)
-      actions = get_action(states)
-
-      pred_rewards = self.rewards_net(states, actions)
-      if clip:
-        pred_rewards = tf.clip_by_value(pred_rewards, min_reward,
-                                        max_reward)
-      logits = self.done_net(states, actions)
-      mask_dist = tfp.distributions.Bernoulli(logits=logits)
-      masks *= tf.cast(mask_dist.sample(), tf.float32)
-
-      if i >= settle_timesteps:
-        returns += masks * pred_rewards
-
-      states = self.dynamics_net(states, actions)
+                            weights,
+                            get_action,
+                            discount,
+                            min_reward,
+                            max_reward,
+                            min_state,
+                            max_state,
+                            clip=True,
+                            horizon=1000,
+                            settle_timesteps=40):
+      """Compute mean and std of returns via rollouts."""
       
-      if clip:
-        states = tf.clip_by_value(states, min_state, max_state)
-    print("pred returns, raw", tf.reduce_sum(
-        weights * returns) / tf.reduce_sum(weights))
-    
-    return tf.reduce_sum(weights * returns) / (tf.reduce_sum(weights))
+      num_trajectories = initial_states.shape[0]
+      states = initial_states
+      masks = tf.ones((num_trajectories,), dtype=tf.float32)
+      
+      # List to store rewards for each time step for each trajectory
+      all_rewards = []
 
+      for i in range(horizon):
+          actions = get_action(states)
+
+          pred_rewards = self.rewards_net(states, actions)
+          if clip:
+              pred_rewards = tf.clip_by_value(pred_rewards, min_reward, max_reward)
+          
+          logits = self.done_net(states, actions)
+          mask_dist = tfp.distributions.Bernoulli(logits=logits)
+          masks *= tf.cast(mask_dist.sample(), tf.float32)
+
+          # Store the rewards for this time step
+          if i >= settle_timesteps:
+              all_rewards.append(masks * pred_rewards)
+
+          states = self.dynamics_net(states, actions)
+          if clip:
+              states = tf.clip_by_value(states, min_state, max_state)
+      
+      # Sum up rewards for each trajectory across time steps
+      returns_per_trajectory = tf.reduce_sum(tf.stack(all_rewards, axis=0), axis=0)
+      # print(returns_per_trajectory.shape)
+      # Calculate the weighted mean and standard deviation of returns
+      weighted_returns = weights * returns_per_trajectory
+      mean_rewards = tf.reduce_sum(weighted_returns) / tf.reduce_sum(weights)
+      std_deviation = tf.math.reduce_std(returns_per_trajectory)
+      
+      return mean_rewards, std_deviation
 
   def estimate_returns(self,
                        initial_states,

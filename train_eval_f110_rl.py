@@ -129,7 +129,7 @@ flags.DEFINE_float('noise_scale', 0.0, 'Noise scaling for data augmentation.') #
 flags.DEFINE_string('model_path', None, 'Path to saved model.')
 flags.DEFINE_bool('no_behavior_cloning', False, 'Whether to use behavior cloning')
 flags.DEFINE_bool('alternate_reward', False, 'Whether to use alternate reward')
-
+flags.DEFINE_string('path', "trajectories.zarr", "The reward dataset to use")
 
 
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
@@ -177,7 +177,7 @@ def main(_):
       target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_926_test", hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_930", hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.f110:
@@ -201,11 +201,44 @@ def main(_):
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap,
         debug=False,
-        path = "/app/ws/f1tenth_orl_dataset/data/trajectories.zarr",
-        exclude_agents = ['det'] + [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
+        exclude_agents = ['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
         scans_as_states=False,
         alternate_reward=FLAGS.alternate_reward,)
     
+
+    eval1_dataset = F110Dataset(
+        env,
+        normalize_states=FLAGS.normalize_states,
+        normalize_rewards=FLAGS.normalize_rewards,
+        noise_scale=FLAGS.noise_scale,
+        bootstrap=FLAGS.bootstrap,
+        debug=False,
+        path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
+        exclude_agents = ['det'] + [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        scans_as_states=False,
+        alternate_reward=FLAGS.alternate_reward,)
+
+    eval2_dataset = F110Dataset(
+      env,
+      normalize_states=FLAGS.normalize_states,
+      normalize_rewards=FLAGS.normalize_rewards,
+      noise_scale=FLAGS.noise_scale,
+      bootstrap=FLAGS.bootstrap,
+      debug=False,
+      path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
+      only_agents= [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+      scans_as_states=False,
+      alternate_reward=FLAGS.alternate_reward,)
+    # sample random 1500 states from both eval1 and eval2
+    eval1_dataset_states = eval1_dataset.states
+    #print("eval1_dataset_states", eval1_dataset_states.shape)
+    eval2_dataset_states = eval2_dataset.states
+    #print("eval2_dataset_states", eval2_dataset_states.shape)
+    sampled_eval1_states = tf.random.shuffle(eval1_dataset_states)[:1500]
+    sampled_eval2_states = tf.random.shuffle(eval2_dataset_states)[:1500]
+    #print("sampled_eval1_states", sampled_eval1_states.shape)
+    #print("sampled_eval1_states", sampled_eval1_states[:2])
     print("Finished loading F110 Dataset")
     print(behavior_dataset.initial_states.shape)
   else:
@@ -457,8 +490,8 @@ def main(_):
                             FLAGS.discount,
                             min_reward, max_reward,
                             min_state, max_state, 
-                            horizon= 600,
-                            path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}.png")#np.max(behavior_dataset.steps) + 1)
+                            horizon= 50,
+                            path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_new.png")#np.max(behavior_dataset.steps) + 1)
         
         print("got rewards")
         # print(get_rewards.shape)
@@ -475,7 +508,7 @@ def main(_):
                                               horizon= horizon)#np.max(behavior_dataset.steps) + 1)
         
         # have estimate for 50 timesteps? but only count the last 30? 
-        """
+        
         pred_mean_returns, pred_std_returns = model.estimate_mean_returns(behavior_dataset.initial_states,
                                                                           behavior_dataset.initial_weights,
                                                                           get_target_actions,
@@ -483,10 +516,12 @@ def main(_):
                                                                           min_reward, max_reward,
                                                                           min_state, max_state, 
                                                                           horizon= 50, 
-                                                                          settle_timesteps = 20)  
+                                                                          settle_timesteps = 0)  
+        pred_mean_returns = behavior_dataset.unnormalize_rewards(pred_mean_returns)
+        pred_std_returns = behavior_dataset.unnormalize_rewards(pred_std_returns)
         tf.summary.scalar('train/pred mean returns (MB)', pred_mean_returns, step=i)
         tf.summary.scalar('train/pred std returns (MB)', pred_std_returns, step=i)
-        """
+
         model.save(f"/app/ws/logdir/mb/mb_model_{i}")
 
       elif FLAGS.algo in ['dual_dice']:

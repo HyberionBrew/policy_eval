@@ -389,6 +389,7 @@ class F110Dataset(Dataset):
                debug=False, 
                path=None,
                exclude_agents = [],
+               only_agents = [],
                alternate_reward = False,
                scans_as_states=False):
     """Processes data from F110 environment.
@@ -420,6 +421,7 @@ class F110Dataset(Dataset):
         
         d4rl_dataset = d4rl_env.get_dataset(zarr_path=path, 
                                             without_agents=exclude_agents, 
+                                            only_agents = only_agents,
                                             alternate_reward = alternate_reward,
                                             #remove_short_trajectories=True,
                                             #split_trajectories=50,
