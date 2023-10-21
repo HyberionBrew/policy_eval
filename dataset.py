@@ -426,7 +426,7 @@ class F110Dataset(Dataset):
                                             #remove_short_trajectories=True,
                                             #split_trajectories=50,
                                             #skip_inital=50,
-                                            min_trajectory_length=600,
+                                            # min_trajectory_length=600,
                                             )
         print(d4rl_dataset.keys())
       else:

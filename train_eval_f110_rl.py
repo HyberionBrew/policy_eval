@@ -177,7 +177,7 @@ def main(_):
       target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_930", hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_test_1020", hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.f110:
@@ -202,11 +202,11 @@ def main(_):
         bootstrap=FLAGS.bootstrap,
         debug=False,
         path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
-        exclude_agents = ['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        exclude_agents = ['progress_weight', 'raceline_delta_weigh', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
         scans_as_states=False,
         alternate_reward=FLAGS.alternate_reward,)
     
-
+    """
     eval1_dataset = F110Dataset(
         env,
         normalize_states=FLAGS.normalize_states,
@@ -215,10 +215,11 @@ def main(_):
         bootstrap=FLAGS.bootstrap,
         debug=False,
         path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
-        exclude_agents = ['det'] + [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        exclude_agents = ,#['det'] + [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
         scans_as_states=False,
         alternate_reward=FLAGS.alternate_reward,)
-
+    
+    
     eval2_dataset = F110Dataset(
       env,
       normalize_states=FLAGS.normalize_states,
@@ -230,13 +231,14 @@ def main(_):
       only_agents= [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
       scans_as_states=False,
       alternate_reward=FLAGS.alternate_reward,)
+    """
     # sample random 1500 states from both eval1 and eval2
-    eval1_dataset_states = eval1_dataset.states
+    # eval1_dataset_states = eval1_dataset.states
     #print("eval1_dataset_states", eval1_dataset_states.shape)
-    eval2_dataset_states = eval2_dataset.states
+    #eval2_dataset_states = eval2_dataset.states
     #print("eval2_dataset_states", eval2_dataset_states.shape)
-    sampled_eval1_states = tf.random.shuffle(eval1_dataset_states)[:1500]
-    sampled_eval2_states = tf.random.shuffle(eval2_dataset_states)[:1500]
+    #sampled_eval1_states = tf.random.shuffle(eval1_dataset_states)[:1500]
+    #sampled_eval2_states = tf.random.shuffle(eval2_dataset_states)[:1500]
     #print("sampled_eval1_states", sampled_eval1_states.shape)
     #print("sampled_eval1_states", sampled_eval1_states[:2])
     print("Finished loading F110 Dataset")
@@ -461,7 +463,7 @@ def main(_):
           
           """
       elif 'mb' in FLAGS.algo:
-        horizon = 600
+        horizon = 1000
         print("Getting rewards")
         """
         get_rewards = model.get_rewards(behavior_dataset.states,
@@ -523,6 +525,8 @@ def main(_):
         tf.summary.scalar('train/pred std returns (MB)', pred_std_returns, step=i)
 
         model.save(f"/app/ws/logdir/mb/mb_model_{i}")
+        # print saved model
+        print(f"saved model as /app/ws/logdir/mb/mb_model_{i}")
 
       elif FLAGS.algo in ['dual_dice']:
         pred_returns, pred_ratio = model.estimate_returns(iter(tf_dataset))
