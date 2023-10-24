@@ -391,7 +391,11 @@ class F110Dataset(Dataset):
                exclude_agents = [],
                only_agents = [],
                alternate_reward = False,
-               scans_as_states=False):
+               scans_as_states=False,
+               state_mean=None,
+               state_std = None,
+               reward_mean = None,
+               reward_std = None):
     """Processes data from F110 environment.
 
     Args:
@@ -521,7 +525,8 @@ class F110Dataset(Dataset):
         if 'initial' not in k:
           dataset[k] = tf.convert_to_tensor(
               np.concatenate(dataset['trajectories'][k], axis=0))
-
+      binary_masks = [np.concatenate(([1], np.zeros(len(state_trajectory)-1))) for state_trajectory in dataset['trajectories']['states']]
+      self.mask_inital = np.concatenate(binary_masks)
       self.states = dataset['states']
       print(self.states[:2])
       self.index = dataset['index']
@@ -555,15 +560,21 @@ class F110Dataset(Dataset):
         # do this on cpu, since it crashes otherwise
         #with tf.device('/CPU:0'): # this needs to be done on CPU since not enough memory
         #print("calculating state mean")
-        self.state_mean = tf.reduce_mean(self.states, 0)
-        #print("calculating state std")
-        # print device of state_mean
-        #print(self.state_mean.device)
-        self.state_std = tf.math.reduce_std(self.states, 0)
+        if state_mean is None:
+          self.state_mean = tf.reduce_mean(self.states, 0)
+          #print("calculating state std")
+          # print device of state_mean
+          #print(self.state_mean.device)
+          self.state_std = tf.math.reduce_std(self.states, 0)
+        else:
+          self.state_mean = state_mean
+          self.state_std = state_std
 
         self.initial_states = self.normalize_states(self.initial_states)
         self.states = self.normalize_states(self.states)
         self.next_states = self.normalize_states(self.next_states)
+        
+
         # Move the tensors back to GPU
         #with tf.device('/GPU:0'):
         #    self.state_mean = tf.identity(self.state_mean)
@@ -576,10 +587,14 @@ class F110Dataset(Dataset):
         self.state_std = 1.0
 
       if normalize_rewards:
-        self.reward_mean = tf.reduce_mean(self.rewards)
-        if tf.reduce_min(self.masks) == 0.0:
-          self.reward_mean = tf.zeros_like(self.reward_mean)
-        self.reward_std = tf.math.reduce_std(self.rewards)
+        if reward_mean is None:
+          self.reward_mean = tf.reduce_mean(self.rewards)
+          if tf.reduce_min(self.masks) == 0.0:
+            self.reward_mean = tf.zeros_like(self.reward_mean)
+          self.reward_std = tf.math.reduce_std(self.rewards)
+        else:
+          self.reward_mean = reward_mean
+          self.reward_std = reward_std
 
         self.rewards = self.normalize_rewards(self.rewards)
       else:

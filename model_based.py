@@ -96,6 +96,52 @@ class ModelBased(object):
         learning_rate=learning_rate, weight_decay=weight_decay)
     self.done_optimizer = tfa_optimizers.AdamW(
         learning_rate=learning_rate, weight_decay=weight_decay)
+  
+  def forward(self, states, actions, min_reward, max_reward, min_state, max_state, clip):
+    """
+    Forward pass through the model.
+    """
+    pred_rewards = self.rewards_net(states, actions)
+    if clip:
+      pred_rewards = tf.clip_by_value(pred_rewards, min_reward,
+                                      max_reward)
+    
+    logits = self.done_net(states, actions)
+
+    states = self.dynamics_net(states, actions)
+    
+    if clip:
+      states = tf.clip_by_value(states, min_state, max_state)
+    
+    return states, pred_rewards, logits
+ 
+  def evaluate(self, states, actions, rewards, next_states,
+              step,
+              name,
+              clip= True,
+              min_reward=-100,
+              max_reward=100,
+              min_state=-100,
+              max_state=100,):
+
+    """
+    Evaluate the model based on the given data.
+    """
+    states = tf.stop_gradient(states)
+    actions = tf.stop_gradient(actions)
+    rewards = tf.stop_gradient(rewards)
+    next_states = tf.stop_gradient(next_states)
+
+    pred_state, pred_rewards, logits = self.forward(states, actions, min_reward, max_reward, min_state, max_state, clip)
+    # compute the loss
+    loss = tf.losses.mean_squared_error(next_states, pred_state)
+    loss = tf.reduce_mean(loss)
+    tf.summary.scalar(f"test/dyn_loss_{name}", loss,
+                        step=self.dyn_optimizer.iterations)
+    loss_reward = tf.losses.mean_squared_error(rewards, pred_rewards)
+    loss_reward = tf.reduce_mean(loss_reward)
+    tf.summary.scalar(f"test/reward_loss_{name}", loss,
+                        step=self.dyn_optimizer.iterations)
 
   @tf.function
   def update(self, states, actions,
@@ -217,6 +263,72 @@ class ModelBased(object):
       rewards = self.rewards_net(states, actions)
       return rewards.numpy()
   
+  def sample_initial_states(self,initial_mask, min_distance=50, num_samples=20):
+      # Find all initial state indices
+      initial_indices = np.where(initial_mask == 1)[0]
+
+      # Filter out the indices that don't have at least min_distance before the next initial state
+      valid_indices = [idx for i, idx in enumerate(initial_indices[:-1]) if initial_indices[i+1] - idx >= min_distance]
+
+      # If the last state is also valid (i.e., it has more than min_distance states until the end of the array)
+      if len(initial_mask) - initial_indices[-1] >= min_distance:
+          valid_indices.append(initial_indices[-1])
+
+      # Sample num_samples indices from valid_indices
+      sampled_indices = np.random.choice(valid_indices, size=min(num_samples, len(valid_indices)), replace=False)
+      
+      return sampled_indices
+  
+  def plot_rollouts_fixed(self, states, 
+                    actions, 
+                    inital_mask,
+                    min_state,
+                    max_state,
+                    clip=True,
+                    horizon=1000,
+                    num_samples = 20,
+                    path="logdir/plts/mb/rollouts_mb.png"):
+
+      sampled_initial_indices = self.sample_initial_states(inital_mask,min_distance=horizon ,num_samples=num_samples)
+      sampled_states = tf.gather(states, sampled_initial_indices)
+      
+      plt.figure(figsize=(12, 6))
+      colors = plt.cm.jet(np.linspace(0, 1, num_samples))
+      
+      # Plot all states as a grey background
+      plt.scatter(states[:, 0], states[:, 1], color='grey', s=5, label='All states', alpha=0.5)
+
+      for idx, start_idx in enumerate(sampled_initial_indices):
+          state_trajectory = [states[start_idx][:2]]  # start with the sampled state
+
+          # Plot "x" at the starting state
+          plt.scatter(state_trajectory[0][0], state_trajectory[0][1], color=colors[idx], marker='x', s=60, label=f'Start {idx + 1}')
+          # Plot the actual states using dashed lines
+          actual_trajectory = states[start_idx:start_idx+horizon, :2]
+          plt.plot(actual_trajectory[:, 0], actual_trajectory[:, 1], '--', label=f"Ground Truth {idx + 1}", color=colors[idx])
+        
+
+          current_state = np.expand_dims(states[start_idx], 0)  # make it (1, state_dim)
+          for i in range(horizon):
+              action = np.expand_dims(actions[start_idx + i], 0) 
+              
+              current_state = self.dynamics_net(current_state, action)
+              if clip:
+                  current_state = np.clip(current_state, min_state, max_state)
+
+              # Collect x, y for plotting
+              state_trajectory.append(current_state[0, :2])
+
+          x_coords, y_coords = zip(*state_trajectory)
+          plt.plot(x_coords, y_coords, label=f"Sample {idx + 1}", color=colors[idx])
+
+      # Additional plot formatting can be done here if needed, like setting axis labels, titles, legends, etc.
+      # plt.legend(loc='upper left')
+      plt.title("Rollouts using Given Actions")
+      plt.savefig(path)
+      plt.show()
+
+
   def plot_rollouts(self, states, 
                       weights, 
                       get_action, 
@@ -227,8 +339,9 @@ class ModelBased(object):
                       max_state,
                       clip=True,
                       horizon=1000,
+                      num_samples = 20,
                       path="logdir/plts/mb/rollouts_mb.png"):
-        num_samples = 20
+
         # sampled_indices = tf.random.shuffle(tf.range(states.shape[0]))[:num_samples]
         # sampled_indices = states[:num_samples]
         sampled_indices = np.linspace(0, states.shape[0]-1, num_samples, dtype=int)
