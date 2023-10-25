@@ -109,10 +109,10 @@ class GroundTruthReward(object):
         # the input observation and action are tensors
         collision = False
         done = False
-        print(observation)
-        print(action)
+        #print(observation)
+        #print(action)
         states = self.dataset.unnormalize_states(observation)
-        print(states)
+        #print(states)
         # need to add the laser observation
         observation_dict = self.model_input_normalizer.unflatten_batch(states)
         laser_scan = self.env.get_laser_scan(states, self.subsample_laser) # TODO! rename f110env to dataset_env
@@ -120,24 +120,29 @@ class GroundTruthReward(object):
         observation_dict['lidar_occupancy'] = laser_scan
         # have to unsqueeze the batch dimension
         observation_dict = {key: value.squeeze(0) if value.ndim > 1 and value.shape[0] == 1 else value for key, value in observation_dict.items()}
-        print(observation_dict)
-        print(np.array([observation_dict['poses_x'][0], observation_dict['poses_y'][0]]))
+        #print(observation_dict)
+        #print(np.array([observation_dict['poses_x'][0], observation_dict['poses_y'][0]]))
         reward, _ = self.reward(observation_dict, action, 
                                       collision, done)
         return reward
     
     def reset(self, pose , velocity=1.5):
+        # add 9 empty states such that we can use the unnormalize function
+        states = np.zeros((1, 11), dtype=np.float32)
+        states[0, 0] = pose[0]
+        states[0, 1] = pose[1]
+        pose = self.dataset.unnormalize_states(states)[0][:2]
         self.reward.reset(pose, velocity=velocity)
 
 standard_config = {
     "collision_penalty": 0.0,
-    "progress_weight": 1.0,
+    "progress_weight": 0.0,
     "raceline_delta_weight": 0.0,
     "velocity_weight": 0.0,
     "steering_change_weight": 0.0,
     "velocity_change_weight": 0.0,
     "pure_progress_weight": 0.0,
-    "min_action_weight" : 0.0,
+    "min_action_weight" : 1.0,
     "min_lidar_ray_weight" : 0.0, #missing
     "inital_velocity": 1.5,
     "normalize": False,
@@ -303,14 +308,35 @@ class ModelBased2(object):
             sampled_initial_indices = torch.tensor(sampled_initial_indices)
             discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
             gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
-            print(gt_rewards_segments)
-            print(gt_rewards_segments.shape)
+            print(gt_rewards_segments.cpu().numpy())
+            print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
+            print("aaaaa")
+            # print(gt_rewards_segments.shape)
             gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
             mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
-            print(f"Mean GT rewards: {mean_gt_rewards}")
+            # print(f"Mean GT rewards: {mean_gt_rewards}")
 
             # next perform rollouts from the sampled_initial_indices with the dynamics model
             # use the GT reward model to label the rewards of the rollouts and compute the mean
+            # print("Real first reward: ", rewards[sampled_initial_indices[0]])
+            
+            model_rewards = []
+            for idx in sampled_initial_indices:
+                state = states[idx].unsqueeze(0)
+                rollout_rewards = []
+                # TODO! read velocity from state, quo vadis velocity?
+                self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
+                for i in range(horizon):
+                    action = actions[idx + i].unsqueeze(0)
+                    next_state = states[idx + i + 1].unsqueeze(0)
+                    pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
+                    rollout_rewards.append(pred_reward * (discount**i))
+                    state = next_state
+                    print(f"State {i} : {state}")
+                    print(f"Reward prediction: {pred_reward}")
+                model_rewards.append(sum(rollout_rewards))
+            print("----------")
+            
             model_rewards = []
             for idx in sampled_initial_indices:
                 state = states[idx].unsqueeze(0)
@@ -323,6 +349,8 @@ class ModelBased2(object):
                     pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
                     rollout_rewards.append(pred_reward * (discount**i))
                     state = next_state
+                    print(f"State {i} : {state}")
+                    print(f"Reward prediction: {pred_reward}")
                 model_rewards.append(sum(rollout_rewards))
             mean_model_rewards = np.mean(np.asarray(model_rewards))
             # then compare the two means

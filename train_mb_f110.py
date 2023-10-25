@@ -290,8 +290,8 @@ def main(_):
                                   min_state=min_state,
                                   max_state=max_state,)
       model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-                              horizon=50, num_samples=1)
-      
+                              horizon=5, num_samples=1)
+      exit()
       model.plot_rollouts_fixed(behavior_dataset.states,
                     behavior_dataset.actions,
                     behavior_dataset.mask_inital,
