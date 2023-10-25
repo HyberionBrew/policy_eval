@@ -128,8 +128,7 @@ flags.DEFINE_string('model_path', None, 'Path to saved model.')
 flags.DEFINE_bool('no_behavior_cloning', False, 'Whether to use behavior cloning')
 flags.DEFINE_bool('alternate_reward', False, 'Whether to use alternate reward')
 flags.DEFINE_string('path', "trajectories.zarr", "The reward dataset to use")
-
-
+flags.DEFINE_bool('use_torch', False, 'Whether to use torch (which is the new model)')
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
   if json_parameters:
     for key, value in json.loads(json_parameters).items():
@@ -163,7 +162,7 @@ def main(_):
   """
   tf.random.set_seed(FLAGS.seed)
   # import f110
-  use_torch = True
+  use_torch = FLAGS.use_torch
 
   # get current system time
   import datetime
@@ -176,10 +175,10 @@ def main(_):
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
 
   if use_torch:
-    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1020", "torch_"+hparam_str))
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "torch_"+hparam_str))
   else:
       summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1020", hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "zeroed_2_"+hparam_str))
       summary_writer.set_as_default()
   subsample_laser = 20
   F110Env = gym.make('f110_with_dataset-v0',
@@ -205,7 +204,10 @@ def main(_):
   eval_datasets = []
   
   eval_agents = ['progress_weight', 'raceline_delta_weight', 'min_action_weight']
-  
+  print("means and stds")
+  print(behavior_dataset.reward_mean, behavior_dataset.reward_std,
+        behavior_dataset.state_mean,
+      behavior_dataset.state_std,)
   for i, agent in enumerate(eval_agents):
     evaluation_dataset = F110Dataset(
       env,
@@ -237,13 +239,15 @@ def main(_):
                       learning_rate=FLAGS.lr,
                       weight_decay=FLAGS.weight_decay)
   else:
+    # print a warning
+    print("[WARNING] Using old model!!")
     model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
                         env.action_spec().shape[1], learning_rate=FLAGS.lr,
                         weight_decay=FLAGS.weight_decay)
 
   
   if FLAGS.load_mb_model:
-    model.load("/app/ws/logdir/mb/mb_model_250000")
+    model.load("/app/ws/logdir/mb/mb_model_60000/model_based2_torch_checkpoint.pth")
 
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
@@ -276,7 +280,7 @@ def main(_):
     if i % FLAGS.eval_interval == 0:
       horizon = 500
       print("Starting evaluation")
-      if False:
+      if True:
         for j, evaluation_dataset in enumerate(eval_datasets):
           eval_ds = model.evaluate(evaluation_dataset.states,
                                   evaluation_dataset.actions,
@@ -290,8 +294,8 @@ def main(_):
                                   min_state=min_state,
                                   max_state=max_state,)
       model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-                              horizon=5, num_samples=1)
-      exit()
+                              horizon=25, num_samples=100)
+      # exit()
       model.plot_rollouts_fixed(behavior_dataset.states,
                     behavior_dataset.actions,
                     behavior_dataset.mask_inital,

@@ -413,6 +413,7 @@ class F110Dataset(Dataset):
               states=[],
               scans = [],
               actions=[],
+              raw_actions=[],
               next_scans=[],
               next_states=[],
               rewards=[],
@@ -440,13 +441,14 @@ class F110Dataset(Dataset):
       for idx in range(dataset_length):
         if new_trajectory:
           trajectory = dict(
-              states=[], scans=[], actions=[], next_states=[], next_scans=[], rewards=[], masks=[], index=[], log_probs=[])
+              states=[], scans=[], actions=[], raw_actions=[], next_states=[], next_scans=[], rewards=[], masks=[], index=[], log_probs=[])
         # print keys of d4rl_dataset
         #print(d4rl_dataset.keys())
         trajectory['states'].append(d4rl_dataset['observations'][idx])
         trajectory['scans'].append(d4rl_dataset['scans'][idx])
         trajectory['index'].append(d4rl_dataset['index'][idx])
         trajectory['actions'].append(d4rl_dataset['actions'][idx])
+        trajectory['raw_actions'].append(d4rl_dataset['raw_actions'][idx])
         trajectory['rewards'].append(d4rl_dataset['rewards'][idx])
         trajectory['log_probs'].append(d4rl_dataset['log_probs'][idx])
         trajectory['masks'].append(1.0 - d4rl_dataset['terminals'][idx])
@@ -534,6 +536,7 @@ class F110Dataset(Dataset):
       self.next_scans = dataset['next_scans']
       # print(self.states.device)
       self.actions = dataset['actions']
+      self.raw_actions = dataset['raw_actions']
       #print(self.actions.device)
       # self.initial_scans = dataset['initial_scans']
       self.next_states = dataset['next_states']

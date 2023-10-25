@@ -48,6 +48,9 @@ class DynamicsModel(nn.Module):
         xu = torch.cat((x, u), -1)
         xu[:, self.STATE_X:self.STATE_Y+1] = 0  # Remove dependency in (x,y)
         xu[:, self.STATE_PROGRESS_SIN:self.STATE_PROGRESS_COS+1] = 0  # Remove dependency in progress
+        # calculate the actual input action by using the previous action ob + the cliped and scaled action
+        # but would also need unnormalization and then renomalization, so not at this point in time
+        
         A = self.A2(F.relu(self.A1(xu)))
         A = torch.reshape(A, (x.shape[0], self.state_size, self.state_size))
         B = self.B2(F.relu(self.B1(xu)))
@@ -114,15 +117,20 @@ class GroundTruthReward(object):
         states = self.dataset.unnormalize_states(observation)
         #print(states)
         # need to add the laser observation
+        #print("unnormalized")
+        #print(states)
         observation_dict = self.model_input_normalizer.unflatten_batch(states)
         laser_scan = self.env.get_laser_scan(states, self.subsample_laser) # TODO! rename f110env to dataset_env
         laser_scan = self.model_input_normalizer.normalize_laser_scan(laser_scan)
         observation_dict['lidar_occupancy'] = laser_scan
         # have to unsqueeze the batch dimension
         observation_dict = {key: value.squeeze(0) if value.ndim > 1 and value.shape[0] == 1 else value for key, value in observation_dict.items()}
-        #print(observation_dict)
+        #print("previous action:", observation_dict["previous_action"])
+        #print("current action:", np.clip(action, -1, 1) * 0.05)
+        raw_action = observation_dict['previous_action'] + np.clip(action, -1, 1) * 0.05
+        #print(f"calcuated raw_action {raw_action}")
         #print(np.array([observation_dict['poses_x'][0], observation_dict['poses_y'][0]]))
-        reward, _ = self.reward(observation_dict, action, 
+        reward, _ = self.reward(observation_dict, raw_action, 
                                       collision, done)
         return reward
     
@@ -136,13 +144,13 @@ class GroundTruthReward(object):
 
 standard_config = {
     "collision_penalty": 0.0,
-    "progress_weight": 0.0,
+    "progress_weight": 1.0,
     "raceline_delta_weight": 0.0,
     "velocity_weight": 0.0,
     "steering_change_weight": 0.0,
     "velocity_change_weight": 0.0,
     "pure_progress_weight": 0.0,
-    "min_action_weight" : 1.0,
+    "min_action_weight" : 0.0,
     "min_lidar_ray_weight" : 0.0, #missing
     "inital_velocity": 1.5,
     "normalize": False,
@@ -213,10 +221,10 @@ class ModelBased2(object):
             self.optimizer_done.step()
         
         if self.dynamics_optimizer_iterations % 1000 == 0:
-            self.writer.add_scalar('train/dyn_loss', dyn_loss.item(), global_step=self.dynamics_optimizer_iterations)
+            self.writer.add_scalar('cond/train/dyn_loss', dyn_loss.item(), global_step=self.dynamics_optimizer_iterations)
             if self.use_reward_model:
-                self.writer.add_scalar('train/rew_loss', reward_loss.item(), global_step=self.dynamics_optimizer_iterations)
-                self.writer.add_scalar('train/done_loss', done_loss.item(), global_step=self.dynamics_optimizer_iterations)
+                self.writer.add_scalar('cond/train/rew_loss', reward_loss.item(), global_step=self.dynamics_optimizer_iterations)
+                self.writer.add_scalar('cond/train/done_loss', done_loss.item(), global_step=self.dynamics_optimizer_iterations)
         self.dynamics_optimizer_iterations += 1
     
     def plot_rollouts_fixed(self, states, actions, inital_mask, min_state, max_state, 
@@ -299,6 +307,8 @@ class ModelBased2(object):
         """
         with torch.no_grad():
             states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
             states = tf_to_torch(states).to(self.device)
             actions = tf_to_torch(actions).to(self.device)
             rewards = tf_to_torch(rewards).to(self.device)
@@ -308,9 +318,9 @@ class ModelBased2(object):
             sampled_initial_indices = torch.tensor(sampled_initial_indices)
             discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
             gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
-            print(gt_rewards_segments.cpu().numpy())
-            print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
-            print("aaaaa")
+            #print(gt_rewards_segments.cpu().numpy())
+            #print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
+            #print("aaaaa")
             # print(gt_rewards_segments.shape)
             gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
             mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
@@ -320,40 +330,63 @@ class ModelBased2(object):
             # use the GT reward model to label the rewards of the rollouts and compute the mean
             # print("Real first reward: ", rewards[sampled_initial_indices[0]])
             
+            
+            """
             model_rewards = []
             for idx in sampled_initial_indices:
+                print(idx)
                 state = states[idx].unsqueeze(0)
                 rollout_rewards = []
                 # TODO! read velocity from state, quo vadis velocity?
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
                 for i in range(horizon):
+                    print("******")
                     action = actions[idx + i].unsqueeze(0)
+                    # print("raw_action", raw_actions[idx + i].unsqueeze(0))
                     next_state = states[idx + i + 1].unsqueeze(0)
                     pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
                     rollout_rewards.append(pred_reward * (discount**i))
                     state = next_state
-                    print(f"State {i} : {state}")
+                    # print(f"State {i} : {state}")
                     print(f"Reward prediction: {pred_reward}")
+                    print("+++++++")
                 model_rewards.append(sum(rollout_rewards))
             print("----------")
+            """
             
             model_rewards = []
             for idx in sampled_initial_indices:
                 state = states[idx].unsqueeze(0)
                 rollout_rewards = []
-                # TODO! read velocity from state, quo vadis velocity?
+                # TODO! read velocity from state, quo vadis velocity?, 
+                # but should be unnecessary for used rewards aorn
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
                 for i in range(horizon):
                     action = actions[idx + i].unsqueeze(0)
+                    #print("action", action)
+                    
+                    #action_raw = raw_actions[idx + i].unsqueeze(0).cpu().numpy()
+                    #print("raw action", action_raw)
                     next_state = self.dynamics_model(state, action)
+                    # can calculate action_raw by taking current action adding to previous_action observation
                     pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
                     rollout_rewards.append(pred_reward * (discount**i))
                     state = next_state
-                    print(f"State {i} : {state}")
-                    print(f"Reward prediction: {pred_reward}")
+                    #print(f"State {i} : {state}")
+                    #print(f"Reward prediction: {pred_reward}")
                 model_rewards.append(sum(rollout_rewards))
+
             mean_model_rewards = np.mean(np.asarray(model_rewards))
             # then compare the two means
+            # write to tensorboard
+            mean_gt_rewards = mean_gt_rewards.cpu().numpy()
+            self.writer.add_scalar('test/mean_gt_rewards', mean_gt_rewards, global_step=self.dynamics_optimizer_iterations)
+            self.writer.add_scalar('test/mean_model_rewards', mean_model_rewards, global_step=self.dynamics_optimizer_iterations)
+            diff = mean_gt_rewards - mean_model_rewards
+            self.writer.add_scalar('test/model_diff', diff, global_step=self.dynamics_optimizer_iterations)
+            print(diff)
+            print(mean_gt_rewards)
+            print(mean_model_rewards)
         return mean_gt_rewards, mean_model_rewards
 
     def evaluate(self, states, actions, rewards, next_states, step, name, 

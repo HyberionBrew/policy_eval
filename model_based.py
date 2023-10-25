@@ -45,6 +45,10 @@ class ForwardModel(tf.keras.Model):
   @tf.function
   def call(self, x, a):
     x_a = tf.concat([x, a], -1)
+    # set the first two states in the model to 0
+    x_a = tf.concat([tf.zeros_like(x_a[:, :2]), x_a[:, 2:]], -1)
+    # set states 9 and 10 to 0
+    x_a = tf.concat([x_a[:, :9], tf.zeros_like(x_a[:, 9:11]), x_a[:, 11:]], -1)
     return self.model(x_a) + x
 
 
@@ -73,6 +77,20 @@ class RewardModel(tf.keras.Model):
     x_a = tf.concat([x, a], -1)
     return tf.squeeze(self.model(x_a), 1)
 
+from model_based_2 import GroundTruthReward
+standard_config = {
+    "collision_penalty": 0.0,
+    "progress_weight": 1.0,
+    "raceline_delta_weight": 0.0,
+    "velocity_weight": 0.0,
+    "steering_change_weight": 0.0,
+    "velocity_change_weight": 0.0,
+    "pure_progress_weight": 0.0,
+    "min_action_weight" : 0.0,
+    "min_lidar_ray_weight" : 0.0,
+    "inital_velocity": 1.5,
+    "normalize": False,
+}
 
 class ModelBased(object):
   """A class that learns models and estimated returns via rollouts."""
@@ -114,7 +132,60 @@ class ModelBased(object):
       states = tf.clip_by_value(states, min_state, max_state)
     
     return states, pred_rewards, logits
- 
+  
+
+  def evaluate_rollouts(self, dataset, unnormalize_fn, 
+                        horizon=100, num_samples=20, discount=1.0):
+    reward_model = GroundTruthReward("Infsaal",dataset,20, **standard_config)
+    states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital        
+    states = tf.stop_gradient(states)
+    actions = tf.stop_gradient(actions)
+    rewards = tf.stop_gradient(rewards)
+    # next_states = tf.stop_gradient(next_states)
+    sampled_initial_indices = self.sample_initial_states(inital_mask, min_distance=horizon, num_samples=num_samples)
+    sampled_initial_indices = tf.convert_to_tensor(sampled_initial_indices)
+    discount_factors = tf.convert_to_tensor([discount**i for i in range(horizon)])
+
+    indices_range = tf.range(horizon)
+    # Broadcasting addition to get the indices for slices.
+    indices_for_segments = sampled_initial_indices[:, tf.newaxis] + indices_range
+    gt_rewards_segments = tf.gather(rewards, indices_for_segments)
+
+    gt_rewards = tf.reduce_sum(gt_rewards_segments * discount_factors, axis=1)
+
+    mean_gt_rewards_tensor = tf.reduce_mean(gt_rewards)
+
+    mean_gt_rewards = unnormalize_fn(mean_gt_rewards_tensor.numpy().item())
+
+    model_rewards = []
+    for idx in sampled_initial_indices:
+      state = tf.expand_dims(states[idx], axis=0)
+      rollout_rewards = []
+      reward_model.reset(state[0, :2].numpy(), velocity=1.5)
+      for i in range(horizon):
+        action = tf.expand_dims(actions[idx + i], axis=0)
+        
+        next_state = self.dynamics_net(state, action)
+        
+        # Ensure state and action tensors are converted to numpy arrays for reward_model call.
+        pred_reward = reward_model(state.cpu().numpy(), action.cpu().numpy())
+        
+        # Calculate discounted reward
+        discounted_reward = pred_reward * (discount**i)
+        
+        rollout_rewards.append(discounted_reward)
+        
+        state = next_state
+
+      model_rewards.append(tf.reduce_sum(rollout_rewards))
+    mean_model_rewards = tf.reduce_mean(tf.convert_to_tensor(model_rewards))
+    mean_gt_rewards = mean_gt_rewards.numpy()
+    tf.summary.scalar('test/mean_gt_rewards', mean_gt_rewards, step=self.dyn_optimizer.iterations)
+    tf.summary.scalar('test/mean_model_rewards', mean_model_rewards, step=self.dyn_optimizer.iterations)
+    diff = mean_gt_rewards - mean_model_rewards
+    tf.summary.scalar('test/model_diff', diff, step=self.dyn_optimizer.iterations)
+    return mean_gt_rewards, mean_model_rewards, diff
+
   def evaluate(self, states, actions, rewards, next_states,
               step,
               name,
@@ -263,7 +334,7 @@ class ModelBased(object):
       rewards = self.rewards_net(states, actions)
       return rewards.numpy()
   
-  def sample_initial_states(self,initial_mask, min_distance=50, num_samples=20):
+  def sample_initial_states(self, initial_mask, min_distance=50, num_samples=20):
       # Find all initial state indices
       initial_indices = np.where(initial_mask == 1)[0]
 
@@ -274,8 +345,15 @@ class ModelBased(object):
       if len(initial_mask) - initial_indices[-1] >= min_distance:
           valid_indices.append(initial_indices[-1])
 
-      # Sample num_samples indices from valid_indices
-      sampled_indices = np.random.choice(valid_indices, size=min(num_samples, len(valid_indices)), replace=False)
+      # If there are fewer or equal valid indices than num_samples, return all valid indices
+      if len(valid_indices) <= num_samples:
+          return valid_indices
+      
+      # Determine the step size to take to get num_samples from the list of valid_indices
+      step_size = len(valid_indices) // num_samples
+
+      # Select the indices
+      sampled_indices = valid_indices[::step_size][:num_samples]
       
       return sampled_indices
   
@@ -288,6 +366,10 @@ class ModelBased(object):
                     horizon=1000,
                     num_samples = 20,
                     path="logdir/plts/mb/rollouts_mb.png"):
+
+      # set to no gradients
+      states = tf.stop_gradient(states)
+      actions = tf.stop_gradient(actions)
 
       sampled_initial_indices = self.sample_initial_states(inital_mask,min_distance=horizon ,num_samples=num_samples)
       sampled_states = tf.gather(states, sampled_initial_indices)
