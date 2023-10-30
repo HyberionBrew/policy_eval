@@ -204,7 +204,12 @@ def main(_):
         path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
         exclude_agents = ['progress_weight', 'raceline_delta_weigh', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
         scans_as_states=False,
-        alternate_reward=FLAGS.alternate_reward,)
+        alternate_reward=FLAGS.alternate_reward,
+        include_timesteps_in_obs = True,
+        only_terminals=True,
+        clip_trajectory_length= (0,100),
+  
+        )
     
     """
     eval1_dataset = F110Dataset(
@@ -390,7 +395,8 @@ def main(_):
     # self.rewards, self.masks,
     #     self.weights, self.log_prob)
     (states, scans, actions, next_states, next_scans, rewards, masks, weights,
-     log_prob) = next(tf_dataset_iter)
+     log_prob, timesteps) = next(tf_dataset_iter)
+    # print(behavior_dataset.timestep_constant)
     # print("max_trajectory_length ", np.max(behavior_dataset.steps) + 1)
     #print("--------")
     #print("scan on record", scans[:2])
@@ -410,7 +416,7 @@ def main(_):
       next_actions = get_target_actions(next_states, scans=next_scans)
 
       model.update(states, actions, next_states, next_actions, rewards, masks,
-                   weights, FLAGS.discount, min_reward, max_reward)
+                   weights, FLAGS.discount, min_reward, max_reward, timesteps, behavior_dataset.timestep_constant)
       
     elif 'mb' in FLAGS.algo or 'hybrid' in FLAGS.algo:
       if not(FLAGS.load_mb_model):

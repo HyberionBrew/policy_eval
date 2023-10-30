@@ -175,10 +175,10 @@ def main(_):
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
 
   if use_torch:
-    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "torch_"+hparam_str))
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "torch_four_"+hparam_str))
   else:
       summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "zeroed_2_"+hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "ensemble_"+hparam_str))
       summary_writer.set_as_default()
   subsample_laser = 20
   F110Env = gym.make('f110_with_dataset-v0',
@@ -234,7 +234,7 @@ def main(_):
 
   if use_torch:
     model = ModelBased2(behavior_dataset.states.shape[1],
-                      env.action_spec().shape[1], 256, dt=1/20, logger=writer, 
+                      env.action_spec().shape[1], [256,256,256,256], dt=1/20, logger=writer, 
                       dataset=behavior_dataset,
                       learning_rate=FLAGS.lr,
                       weight_decay=FLAGS.weight_decay)
@@ -247,7 +247,7 @@ def main(_):
 
   
   if FLAGS.load_mb_model:
-    model.load("/app/ws/logdir/mb/mb_model_60000/model_based2_torch_checkpoint.pth")
+    model.load("/app/ws/logdir/mb/mb_model_80000/model_based2_torch_checkpoint.pth")
 
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
@@ -300,7 +300,7 @@ def main(_):
                     behavior_dataset.actions,
                     behavior_dataset.mask_inital,
                     min_state, max_state, 
-                    horizon= 200,
+                    horizon= 50,
                     path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch.png")#np.max(behavior_dataset.steps) + 1)
 
 

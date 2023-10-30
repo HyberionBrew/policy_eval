@@ -50,7 +50,7 @@ class QFitter(object):
   """A critic network that estimates a dual Q-function."""
 
   def __init__(self, state_dim, action_dim, critic_lr,
-               weight_decay, tau, log_frequency = 500):
+               weight_decay, tau, use_time=False, timestep_constant = 0.01, log_frequency = 500):
     """Creates networks.
 
     Args:
@@ -60,6 +60,12 @@ class QFitter(object):
       weight_decay: Weight decay.
       tau: Soft update discount.
     """
+
+    if use_time:
+      state_dim += 1
+      self.use_time = True
+      self.timestep_constant = timestep_constant
+    
     self.critic = CriticNet(state_dim, action_dim)
     self.critic_target = CriticNet(state_dim, action_dim)
 
@@ -95,7 +101,7 @@ class QFitter(object):
              next_states, next_actions,
              rewards, masks, weights,
              discount, min_reward,
-             max_reward):
+             max_reward, timesteps, timestep_constant):
     """Updates critic parameters.
 
     Args:
@@ -113,6 +119,10 @@ class QFitter(object):
     Returns:
       Critic loss.
     """
+    if self.use_time:
+      states = tf.concat([states, timesteps], axis = 1)
+      next_states = tf.concat([next_states, timesteps + timestep_constant], axis = 1)
+    
 
     next_q = self.critic_target(next_states, next_actions) / (1 - discount)
     target_q = rewards + discount * masks * next_q

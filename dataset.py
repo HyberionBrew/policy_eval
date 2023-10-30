@@ -171,7 +171,7 @@ class Dataset(object):
   def with_uniform_sampling(self, sample_batch_size):
     return tf.data.Dataset.from_tensor_slices(
         (self.states, self.scans, self.actions, self.next_states,self.next_scans, self.rewards, self.masks,
-        self.weights, self.log_probs)).repeat().shuffle(
+        self.weights, self.log_probs, self.timesteps)).repeat().shuffle(
             self.states.shape[0], reshuffle_each_iteration=True).batch(
                 sample_batch_size, drop_remainder=True).apply(
       tf.data.experimental.copy_to_device("/gpu:0")).prefetch(tf.data.AUTOTUNE)
@@ -395,7 +395,11 @@ class F110Dataset(Dataset):
                state_mean=None,
                state_std = None,
                reward_mean = None,
-               reward_std = None):
+               reward_std = None,
+               include_timesteps_in_obs = False,
+               only_terminals=False,
+               clip_trajectory_length= None,
+               ):
     """Processes data from F110 environment.
 
     Args:
@@ -419,6 +423,7 @@ class F110Dataset(Dataset):
               rewards=[],
               index=[],
               masks=[],
+              timesteps=[],
               log_probs = []))
       #print(path)
       
@@ -428,6 +433,9 @@ class F110Dataset(Dataset):
                                             without_agents=exclude_agents, 
                                             only_agents = only_agents,
                                             alternate_reward = alternate_reward,
+                                            include_timesteps_in_obs = include_timesteps_in_obs,
+                                            only_terminals=only_terminals,
+                                            clip_trajectory_length=clip_trajectory_length,
                                             #remove_short_trajectories=True,
                                             #split_trajectories=50,
                                             #skip_inital=50,
@@ -438,13 +446,19 @@ class F110Dataset(Dataset):
         d4rl_dataset = d4rl_env.get_dataset()
       dataset_length = len(d4rl_dataset['actions'])
       new_trajectory = True
+      self.timestep_constant = None
+      if 'timesteps_constant' in d4rl_dataset.keys():
+        self.timestep_constant = d4rl_dataset['timesteps_constant']
+        print(self.timestep_constant)
       for idx in range(dataset_length):
         if new_trajectory:
           trajectory = dict(
-              states=[], scans=[], actions=[], raw_actions=[], next_states=[], next_scans=[], rewards=[], masks=[], index=[], log_probs=[])
+              states=[], scans=[], actions=[], raw_actions=[], next_states=[], next_scans=[], rewards=[], masks=[], index=[],timesteps=[], log_probs=[])
         # print keys of d4rl_dataset
         #print(d4rl_dataset.keys())
         trajectory['states'].append(d4rl_dataset['observations'][idx])
+        trajectory['timesteps'].append(d4rl_dataset['timesteps'][idx])
+        # print("timestep:", d4rl_dataset['timesteps'][idx])
         trajectory['scans'].append(d4rl_dataset['scans'][idx])
         trajectory['index'].append(d4rl_dataset['index'][idx])
         trajectory['actions'].append(d4rl_dataset['actions'][idx])
@@ -459,6 +473,7 @@ class F110Dataset(Dataset):
         end_trajectory = (d4rl_dataset['terminals'][idx] or
                           d4rl_dataset['timeouts'][idx])
         if end_trajectory:
+          # exit()
           trajectory['next_states'].append(d4rl_dataset['observations'][idx])
           trajectory['next_scans'].append(d4rl_dataset['scans'][idx])
 
@@ -533,6 +548,7 @@ class F110Dataset(Dataset):
       print(self.states[:2])
       self.index = dataset['index']
       self.scans = dataset['scans']
+      self.timesteps = dataset['timesteps']
       self.next_scans = dataset['next_scans']
       # print(self.states.device)
       self.actions = dataset['actions']
