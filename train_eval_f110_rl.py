@@ -21,7 +21,7 @@ from absl import logging
 from stable_baselines3 import PPO # this needs to be imported before tensorflow
 import tensorflow as tf
 from utils import plot_reward_heatmap
-gpu_memory = 12209 # GPU memory available on the machine
+gpu_memory = 24576 # GPU memory available on the machine
 # 45% of the memory, this way we can launch a second process on the same GPU
 allowed_gpu_memory = gpu_memory * 0.25
 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -130,6 +130,7 @@ flags.DEFINE_string('model_path', None, 'Path to saved model.')
 flags.DEFINE_bool('no_behavior_cloning', False, 'Whether to use behavior cloning')
 flags.DEFINE_bool('alternate_reward', False, 'Whether to use alternate reward')
 flags.DEFINE_string('path', "trajectories.zarr", "The reward dataset to use")
+flags.DEFINE_integer('clip_trajectory_max', 0, 'Max trajectory length')
 
 
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
@@ -177,7 +178,7 @@ def main(_):
       target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_test_1020", hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_{FLAGS.clip_trajectory_max}_1030_fqe", hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.f110:
@@ -194,6 +195,9 @@ def main(_):
     print(env.observation_space)
     
     print("-------")
+    clip_trajectory_length = None
+    if FLAGS.clip_trajectory_max > 0:
+      clip_trajectory_length = (0,FLAGS.clip_trajectory_max)
     behavior_dataset = F110Dataset(
         env,
         normalize_states=FLAGS.normalize_states,
@@ -207,7 +211,7 @@ def main(_):
         alternate_reward=FLAGS.alternate_reward,
         include_timesteps_in_obs = True,
         only_terminals=True,
-        clip_trajectory_length= (0,100),
+        clip_trajectory_length= clip_trajectory_length,
   
         )
     
@@ -271,7 +275,9 @@ def main(_):
     print(env.action_spec().shape)
     model = QFitter(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
                     env.action_spec().shape[1], FLAGS.lr, FLAGS.weight_decay,
-                    FLAGS.tau)
+                    FLAGS.tau, 
+                    use_time=True, 
+                    timestep_constant = behavior_dataset.timestep_constant)
 
   elif 'mb' in FLAGS.algo:
     model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
@@ -396,7 +402,7 @@ def main(_):
     #     self.weights, self.log_prob)
     (states, scans, actions, next_states, next_scans, rewards, masks, weights,
      log_prob, timesteps) = next(tf_dataset_iter)
-    # print(behavior_dataset.timestep_constant)
+
     # print("max_trajectory_length ", np.max(behavior_dataset.steps) + 1)
     #print("--------")
     #print("scan on record", scans[:2])
@@ -416,8 +422,8 @@ def main(_):
       next_actions = get_target_actions(next_states, scans=next_scans)
 
       model.update(states, actions, next_states, next_actions, rewards, masks,
-                   weights, FLAGS.discount, min_reward, max_reward, timesteps, behavior_dataset.timestep_constant)
-      
+                   weights, FLAGS.discount, min_reward, max_reward, timesteps)
+
     elif 'mb' in FLAGS.algo or 'hybrid' in FLAGS.algo:
       if not(FLAGS.load_mb_model):
         model.update(states, actions, next_states, rewards, masks,
@@ -453,7 +459,7 @@ def main(_):
                                               behavior_dataset.initial_weights,
                                               get_target_actions)
         if (i % FLAGS.eval_interval*2) == 0:
-          model.save(f"/app/ws/logdir/{FLAGS.target_policy}/fqe_model_{i}")
+          model.save(f"/app/ws/logdir/{FLAGS.target_policy}/fqe_model_{i}_{FLAGS.clip_trajectory_max}_{FLAGS.target_policy}")
       elif 'hybrid' in FLAGS.algo:
           """
           forward_inital_states = mb_model.sim_steps(

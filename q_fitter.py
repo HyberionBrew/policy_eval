@@ -76,11 +76,16 @@ class QFitter(object):
                                           weight_decay=weight_decay)
     self.log_frequency = log_frequency
 
-  def __call__(self, states, actions, batch_size = 1000):
+  def __call__(self, states, actions, timesteps=None, batch_size = 1000):
     # batch this call to avoid OOM
     n_data = states.shape[0]
     # List to store results
     results = []
+    if self.use_time:
+      if timesteps ==  None:
+        timesteps = tf.expand_dims(tf.zeros_like(states[:, -1]), -1)
+      states = tf.concat([states, timesteps], axis = 1)
+
 
     # Process in batches
     for i in range(0, n_data, batch_size):
@@ -101,7 +106,7 @@ class QFitter(object):
              next_states, next_actions,
              rewards, masks, weights,
              discount, min_reward,
-             max_reward, timesteps, timestep_constant):
+             max_reward, timesteps=None):
     """Updates critic parameters.
 
     Args:
@@ -121,8 +126,7 @@ class QFitter(object):
     """
     if self.use_time:
       states = tf.concat([states, timesteps], axis = 1)
-      next_states = tf.concat([next_states, timesteps + timestep_constant], axis = 1)
-    
+      next_states = tf.concat([next_states, timesteps + self.timestep_constant], axis = 1)
 
     next_q = self.critic_target(next_states, next_actions) / (1 - discount)
     target_q = rewards + discount * masks * next_q
@@ -162,6 +166,11 @@ class QFitter(object):
       Estimate of returns.
     """
     initial_actions = get_action(initial_states)
+    #if self.use_time:
+    #  print(initial_states.shape)
+    #  initial_states = tf.concat([initial_states, tf.expand_dims(tf.zeros_like(initial_states[:, -1]), -1)], axis=1)
+    print(initial_states.shape)
+    
     preds = self(initial_states, initial_actions)
     # print(preds)
     weighted_mean = (tf.reduce_sum(preds * initial_weights) /
@@ -173,6 +182,10 @@ class QFitter(object):
   def estimate_returns_unweighted(self, initial_states,
       get_action):
       initial_actions = get_action(initial_states)
+      #if self.use_time:
+      #  initial_states = tf.concat([initial_states, tf.expand_dims(tf.zeros_like(initial_states[:, -1]), -1)], axis=1)
+
+      
       preds = self(initial_states, initial_actions)
       return preds
   def save(self, path):
