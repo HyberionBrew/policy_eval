@@ -175,10 +175,10 @@ def main(_):
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
 
   if use_torch:
-    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "torch_four_"+hparam_str))
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_0211", "ensemble_"+hparam_str))
   else:
       summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_1025", "ensemble_"+hparam_str))
+      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_0211", "ensemble_"+hparam_str))
       summary_writer.set_as_default()
   subsample_laser = 20
   F110Env = gym.make('f110_with_dataset-v0',
@@ -200,7 +200,8 @@ def main(_):
       path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
       exclude_agents = ['progress_weight', 'raceline_delta_weight', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
       scans_as_states=False,
-      alternate_reward=FLAGS.alternate_reward,)
+      alternate_reward=FLAGS.alternate_reward,
+      include_timesteps_in_obs = True,)
   eval_datasets = []
   
   eval_agents = ['progress_weight', 'raceline_delta_weight', 'min_action_weight']
@@ -208,24 +209,26 @@ def main(_):
   print(behavior_dataset.reward_mean, behavior_dataset.reward_std,
         behavior_dataset.state_mean,
       behavior_dataset.state_std,)
-  for i, agent in enumerate(eval_agents):
-    evaluation_dataset = F110Dataset(
-      env,
-      normalize_states=FLAGS.normalize_states,
-      normalize_rewards=FLAGS.normalize_rewards,
-      noise_scale=FLAGS.noise_scale,
-      bootstrap=FLAGS.bootstrap,
-      debug=False,
-      path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
-      only_agents = [agent], #['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
-      scans_as_states=False,
-      alternate_reward=FLAGS.alternate_reward,
-      reward_mean = behavior_dataset.reward_mean,
-      reward_std = behavior_dataset.reward_std,
-      state_mean = behavior_dataset.state_mean,
-      state_std = behavior_dataset.state_std,
-      )
-    eval_datasets.append(evaluation_dataset)
+  if True:
+    for i, agent in enumerate(eval_agents):
+      evaluation_dataset = F110Dataset(
+        env,
+        normalize_states=FLAGS.normalize_states,
+        normalize_rewards=FLAGS.normalize_rewards,
+        noise_scale=FLAGS.noise_scale,
+        bootstrap=FLAGS.bootstrap,
+        debug=False,
+        path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
+        only_agents = [agent], #['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        scans_as_states=False,
+        alternate_reward=FLAGS.alternate_reward,
+        include_timesteps_in_obs = True,
+        reward_mean = behavior_dataset.reward_mean,
+        reward_std = behavior_dataset.reward_std,
+        state_mean = behavior_dataset.state_mean,
+        state_std = behavior_dataset.state_std,
+        )
+      eval_datasets.append(evaluation_dataset)
 
   print("Finished loading F110 Dataset")
   
@@ -233,8 +236,13 @@ def main(_):
   tf_dataset_iter = iter(tf_dataset)
 
   if use_torch:
+    min_state = tf.reduce_min(behavior_dataset.states, 0)
+    max_state = tf.reduce_max(behavior_dataset.states, 0)
     model = ModelBased2(behavior_dataset.states.shape[1],
-                      env.action_spec().shape[1], [256,256,256,256], dt=1/20, logger=writer, 
+                      env.action_spec().shape[1], [256,256,256,256], 
+                      dt=1/20, 
+                      min_state=min_state, 
+                      max_state=max_state, logger=writer, 
                       dataset=behavior_dataset,
                       learning_rate=FLAGS.lr,
                       weight_decay=FLAGS.weight_decay)
@@ -247,20 +255,64 @@ def main(_):
 
   
   if FLAGS.load_mb_model:
-    model.load("/app/ws/logdir/mb/mb_model_80000/model_based2_torch_checkpoint.pth")
+    model.load("/app/ws/logdir/mb/mb_model_130000", "new_model")
 
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
   max_reward = tf.reduce_max(behavior_dataset.rewards)
   min_state = tf.reduce_min(behavior_dataset.states, 0)
   max_state = tf.reduce_max(behavior_dataset.states, 0)
+  #print(min_state)
+  #print(max_state)
+
+  actor = F110Actor(FLAGS.target_policy, deterministic=False) #F110Stupid()
+  model_input_normalizer = Normalize()
+
+  def get_target_actions(states, scans= None, batch_size=5000):
+    num_batches = int(np.ceil(len(states) / batch_size))
+    actions_list = []
+    # batching, s.t. we dont run OOM
+    for i in range(num_batches):
+      start_idx = i * batch_size
+      end_idx = min((i + 1) * batch_size, len(states))
+      batch_states = states[start_idx:end_idx]
+
+      # unnormalize from the dope dataset normalization
+      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
+      batch_states_unnorm = batch_states_unnorm.numpy()
+
+      # get scans
+      if scans is not None:
+        laser_scan = scans[start_idx:end_idx]
+      else:
+        laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+        laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
+
+      # back to dict
+      model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
+      # normalize back to model input
+      model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
+     
+      # now also append the laser scan
+      model_input_dict['lidar_occupancy'] = laser_scan
+      # print(model_input_dict)
+      batch_actions = actor(
+        model_input_dict,
+        std=FLAGS.target_policy_std)[1]
+      
+      actions_list.append(batch_actions)
+
+    actions = tf.concat(actions_list, axis=0)
+    actions = tf.convert_to_tensor(actions)
+    return actions
+
 
   #@tf.function
   def update_step():
     import time
 
     (states, scans, actions, next_states, next_scans, rewards, masks, weights,
-     log_prob) = next(tf_dataset_iter)
+     log_prob, timesteps) = next(tf_dataset_iter)
 
     if not(FLAGS.load_mb_model):
       model.update(states, actions, next_states, rewards, masks,
@@ -280,7 +332,8 @@ def main(_):
     if i % FLAGS.eval_interval == 0:
       horizon = 500
       print("Starting evaluation")
-      if True:
+      if False:
+
         for j, evaluation_dataset in enumerate(eval_datasets):
           eval_ds = model.evaluate(evaluation_dataset.states,
                                   evaluation_dataset.actions,
@@ -293,6 +346,14 @@ def main(_):
                                   max_reward=max_reward,
                                   min_state=min_state,
                                   max_state=max_state,)
+        
+      pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
+                             behavior_dataset.initial_weights,
+                             get_target_actions, horizon=10,
+                             discount=FLAGS.discount,)
+      print("*returns*")
+      print(pred_returns)
+      print(std)
       model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
                               horizon=25, num_samples=100)
       # exit()
@@ -300,11 +361,12 @@ def main(_):
                     behavior_dataset.actions,
                     behavior_dataset.mask_inital,
                     min_state, max_state, 
-                    horizon= 50,
-                    path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch.png")#np.max(behavior_dataset.steps) + 1)
+                    horizon= 500,
+                    num_samples=10,
+                    path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch_find.png")#np.max(behavior_dataset.steps) + 1)
 
 
-      model.save(f"/app/ws/logdir/mb/mb_model_{i}")
+      model.save(f"/app/ws/logdir/mb/mb_model_{i}", "new_model")
       # print saved model
       print(f"saved model as /app/ws/logdir/mb/mb_model_{i}")
 

@@ -6,6 +6,7 @@ from tensorboardX import SummaryWriter
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import random
 
 def tf_to_torch(tf_tensor):
     """
@@ -19,22 +20,43 @@ def tf_to_torch(tf_tensor):
     
     return torch_tensor
 
+import torch.nn.init as init
 class DynamicsModel(nn.Module):
-    def __init__(self, state_size, action_size, hidden_size, dt):
+    def __init__(self, state_size, action_size, hidden_size, dt, min_state, max_state):
         
         super().__init__()
+        self.min_state = min_state
+        self.max_state = max_state
         self.state_size, self.action_size, self.dt = state_size, action_size, dt
         A_size, B_size = state_size * state_size, state_size * action_size
-        self.A1 = nn.Linear(state_size + action_size, hidden_size)
-        self.A2 = nn.Linear(hidden_size, A_size)
-        self.B1 = nn.Linear(state_size + action_size, hidden_size)
-        self.B2 = nn.Linear(hidden_size, B_size)
+        #self.A1 = nn.Linear(state_size + action_size, hidden_size)
+        #self.A2 = nn.Linear(hidden_size, A_size)
+        #self.B1 = nn.Linear(state_size + action_size, hidden_size)
+        #self.B2 = nn.Linear(hidden_size, B_size)
+        self.A_layers = nn.ModuleList()
+        self.A_layers.append(self._make_layer(state_size + action_size, hidden_size[0]))
+        for i in range(1, len(hidden_size)):
+            self.A_layers.append(self._make_layer(hidden_size[i-1], hidden_size[i]))
+        self.A_layers.append(self._make_layer(hidden_size[-1], A_size))
+
+        # Construct hidden layers for B
+        self.B_layers = nn.ModuleList()
+        self.B_layers.append(self._make_layer(state_size + action_size, hidden_size[0]))
+        for i in range(1, len(hidden_size)):
+            self.B_layers.append(self._make_layer(hidden_size[i-1], hidden_size[i]))
+        self.B_layers.append(self._make_layer(hidden_size[-1], B_size))
+        
         self.STATE_X, self.STATE_Y = 0, 1
         self.STATE_PROGRESS_SIN = 9
         self.STATE_PROGRESS_COS = 10
         # maybe also remove this
         self.STATE_PREVIOUS_ACTION_STEERING = 7
         self.STATE_PREVIOUS_ACTION_VELOCITY = 8
+    
+    def _make_layer(self, in_dim, out_dim):
+        layer = nn.Linear(in_dim, out_dim)
+        init.orthogonal_(layer.weight)
+        return layer
 
     def forward(self, x, u):
         """
@@ -51,12 +73,53 @@ class DynamicsModel(nn.Module):
         # calculate the actual input action by using the previous action ob + the cliped and scaled action
         # but would also need unnormalization and then renomalization, so not at this point in time
         
-        A = self.A2(F.relu(self.A1(xu)))
+        #A = self.A2(F.relu(self.A1(xu)))
+        #A = torch.reshape(A, (x.shape[0], self.state_size, self.state_size))
+        #B = self.B2(F.relu(self.B1(xu)))
+        #B = torch.reshape(B, (x.shape[0], self.state_size, self.action_size))
+        for layer in self.A_layers[:-1]:  # All but the last layer
+            xu = F.relu(layer(xu))
+        A = self.A_layers[-1](xu)  # Last layer
         A = torch.reshape(A, (x.shape[0], self.state_size, self.state_size))
-        B = self.B2(F.relu(self.B1(xu)))
+        # Reset and pass through B hidden layers
+        xu = torch.cat((x, u), -1)
+        xu[:, self.STATE_X:self.STATE_Y+1] = 0
+        xu[:, self.STATE_PROGRESS_SIN:self.STATE_PROGRESS_COS+1] = 0
+        for layer in self.B_layers[:-1]:  # All but the last layer
+            xu = F.relu(layer(xu))
+        B = self.B_layers[-1](xu)  # Last layer
         B = torch.reshape(B, (x.shape[0], self.state_size, self.action_size))
+        
         dx = A @ x.unsqueeze(-1) + B @ u.unsqueeze(-1)
-        return x + dx.squeeze()*self.dt
+        x = x + dx.squeeze()*self.dt
+        # clip the state between min and maxstate
+        x = torch.clamp(x, self.min_state, self.max_state)
+        return x
+
+
+class DynamicsModelPolicy(object):
+    def __init__(self, state_dim, action_dim, hidden_size, dt,writer,
+                 learning_rate=1e-3, weight_decay=1e-4):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dynamics_model = DynamicsModel(state_dim, action_dim, hidden_size, dt)
+        self.dynamics_model.to(self.device)
+        self.optimizer_dynamics = optim.Adam(self.dynamics_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.writer=writer
+
+    def update(self, states,actions,next_states, step):
+        self.optimizer_dynamics.zero_grad()  # Reset gradients
+        pred_states = self.dynamics_model(states, actions)
+        dyn_loss = F.mse_loss(pred_states, next_states, reduction='none')
+        dyn_loss = (dyn_loss).mean()
+        dyn_loss.backward()  # Compute gradients
+        self.optimizer_dynamics.step()
+        self.writer.add_scalar('cond/train/dyn_loss', dyn_loss.item(), global_step=step)
+
+    def __call__(self, states, actions):
+        return self.dynamics_model(states, actions)
+
+    def save(self, path, filename):
+        torch.save(self.dynamics_model.state_dict(), os.path.join(path, filename))
 
 
 class RewardModel(nn.Module):
@@ -156,13 +219,116 @@ standard_config = {
     "normalize": False,
 }
 
-class ModelBased2(object):
-    def __init__(self, state_dim, action_dim, hidden_size, dt,
-                 logger, dataset,use_reward_model=False,
-                 learning_rate=1e-3, weight_decay=1e-4):
+def dynamic_xavier_init(scale):
+    def _initializer(m):
+        if isinstance(m, nn.Linear):
+            init.xavier_uniform_(m.weight, gain=scale)
+            if m.bias is not None:
+                init.zeros_(m.bias)
+    return _initializer
+
+
+class ModelBasedEnsemble(object):
+    def __init__(self, state_dim, action_dim, hidden_size,  dt, min_state, max_state,
+                 logger,
+                 learning_rate=1e-3, weight_decay=1e-4, N=10):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.state_dim, self.action_dim, self.hidden_size, self.dt = state_dim, action_dim, hidden_size, dt
-        self.dynamics_model = DynamicsModel(state_dim, action_dim, hidden_size, dt)
+        self.N = N  # Number of models in the ensemble
+        self.models = []  # This will store each of the ensemble members
+        self.optimizers = []
+        self.min_state = min_state
+        self.max_state = max_state
+        for _ in range(self.N):
+            model = DynamicsModel(state_dim, action_dim, 
+                                  hidden_size, dt, min_state,max_state).to(self.device)
+            
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            # reduces performance a bit (n not large enough)
+            #chosen_init = dynamic_xavier_init(scale=random.uniform(0.5, 1.5))
+            #model.apply(chosen_init)
+            self.models.append(model)
+            self.optimizers.append(optimizer)
+
+        self.writer = logger
+
+    def forward(self, x, u):
+        """
+        Forward pass through all models of the ensemble.
+        Returns predictions from all ensemble members.
+        """
+        predictions = []
+        for model in self.models:
+            prediction = model(x, u)
+            predictions.append(prediction)
+        
+        return predictions
+    
+    def update(self, states, actions, next_states, step):
+        # Convert input tensors
+        #states = tf_to_torch(states).to(self.device)
+        #actions = tf_to_torch(actions).to(self.device)
+        #next_states = tf_to_torch(next_states).to(self.device)
+
+        # Bootstrapping for each model in the ensemble
+        batch_size = states.size(0)
+        
+        for model, optimizer in zip(self.models, self.optimizers):
+            # Sample with replacement to create a bootstrapped batch
+            indices = torch.randint(0, batch_size, (batch_size,)).to(self.device)
+            bootstrapped_states = states[indices]
+            bootstrapped_actions = actions[indices]
+            bootstrapped_next_states = next_states[indices]
+            
+            # Reset gradients for the current model
+            optimizer.zero_grad()
+            
+            # Predict using the current model and calculate loss
+            pred_states = model(bootstrapped_states, bootstrapped_actions)
+            dyn_loss = F.mse_loss(pred_states, bootstrapped_next_states, reduction='none')
+            dyn_loss = (dyn_loss).mean()
+            
+            # Compute gradients and update model parameters
+            dyn_loss.backward()
+            optimizer.step()
+
+        #self.dynamics_optimizer_iterations = 0
+    def __call__(self,x,u):
+        predictions = self.forward(x, u)
+        avg_prediction = torch.mean(torch.stack(predictions), dim=0)
+        return avg_prediction
+    
+    def save(self, path, filename):
+        #print("saving model right now not implemented")
+        for i, model in enumerate(self.models):
+            torch.save(model.state_dict(), os.path.join(path, f"{filename}_{i}.pth"))
+
+        #pass
+        #for model in self.models:
+    def load(self, path, filename):
+        for i, model in enumerate(self.models):
+            model.load_state_dict(torch.load(os.path.join(path, f"{filename}_{i}.pth")))
+
+class ModelBased2(object):
+    def __init__(self, state_dim, action_dim, hidden_size, dt,
+                 logger, dataset, min_state, max_state, use_reward_model=False,
+                 learning_rate=1e-3, weight_decay=1e-4,):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.state_dim, self.action_dim, self.hidden_size, self.dt = state_dim, action_dim, hidden_size, dt
+        self.dynamics_model = ModelBasedEnsemble(state_dim, 
+                                                   action_dim,
+                                                    hidden_size,
+                                                    dt,
+                                                    tf_to_torch(min_state).to(self.device),
+                                                    tf_to_torch(max_state).to(self.device),
+                                                    logger,
+                                                    learning_rate=learning_rate,
+                                                    weight_decay=weight_decay,
+                                                    N=3)
+        #DynamicsModelPolicy(state_dim, action_dim, hidden_size, dt, logger,
+                              #                    learning_rate=learning_rate, weight_decay=weight_decay)
+        #self.min_state = 
+        #self.max_state = 
         self.use_reward_model = use_reward_model
         if use_reward_model:
             self.reward_model = RewardModel(state_dim, action_dim)
@@ -175,9 +341,9 @@ class ModelBased2(object):
 
         self.writer=logger
         
-        self.dynamics_model.to(self.device)
+        # self.dynamics_model.to(self.device)
         
-        self.optimizer_dynamics = optim.Adam(self.dynamics_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        #self.optimizer_dynamics = optim.Adam(self.dynamics_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         if use_reward_model:
             self.optimizer_reward = optim.Adam(self.reward_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
             self.optimizer_done = optim.Adam(self.done_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -195,13 +361,8 @@ class ModelBased2(object):
         rewards = rewards.to(self.device)
         masks = masks.to(self.device)
 
-        
-        self.optimizer_dynamics.zero_grad()  # Reset gradients
-        pred_states = self.dynamics_model(states, actions)
-        dyn_loss = F.mse_loss(pred_states, next_states, reduction='none')
-        dyn_loss = (dyn_loss).mean()
-        dyn_loss.backward()  # Compute gradients
-        self.optimizer_dynamics.step()  # Update model parameters
+        self.dynamics_model.update(states, actions, next_states, self.dynamics_optimizer_iterations)
+        # Update model parameters
         
         if self.use_reward_model:
             # Update reward model
@@ -221,7 +382,7 @@ class ModelBased2(object):
             self.optimizer_done.step()
         
         if self.dynamics_optimizer_iterations % 1000 == 0:
-            self.writer.add_scalar('cond/train/dyn_loss', dyn_loss.item(), global_step=self.dynamics_optimizer_iterations)
+            
             if self.use_reward_model:
                 self.writer.add_scalar('cond/train/rew_loss', reward_loss.item(), global_step=self.dynamics_optimizer_iterations)
                 self.writer.add_scalar('cond/train/done_loss', done_loss.item(), global_step=self.dynamics_optimizer_iterations)
@@ -229,7 +390,7 @@ class ModelBased2(object):
     
     def plot_rollouts_fixed(self, states, actions, inital_mask, min_state, max_state, 
                             clip=True, horizon=1000, num_samples=20, 
-                            path="logdir/plts/mb/rollouts_mb.png"):
+                            path="logdir/plts/mb/rollouts_mb.png", get_target_action=None):
         with torch.no_grad():
             states = tf_to_torch(states)
             actions = tf_to_torch(actions)
@@ -261,7 +422,11 @@ class ModelBased2(object):
                 
                 current_state = states[start_idx].unsqueeze(0).to(self.device)  # make it (1, state_dim)
                 for i in range(horizon):
-                    action = actions[start_idx + i].unsqueeze(0).to(self.device)
+                    if get_target_action is None:
+                        action = actions[start_idx + i].unsqueeze(0).to(self.device)
+                    else:
+                        action = get_target_action(current_state.to('cpu').numpy())
+                        action = tf_to_torch(action).to(self.device)
 
                     current_state = self.dynamics_model(current_state, action)
                     if clip:
@@ -276,6 +441,42 @@ class ModelBased2(object):
             plt.title("Rollouts using Given Actions (torch)")
             plt.savefig(path)
             plt.show()
+
+    def estimate_returns(self,inital_states, inital_weights, get_target_action, horizon=50, discount=0.99):
+        with torch.no_grad():
+            inital_states = tf_to_torch(inital_states)
+            inital_states = inital_states.to('cpu')
+
+            # loop over the inital states
+            model_rewards = []
+            print(len(inital_states))
+            j = 0
+            for inital_state in inital_states: # loop over batch dimension
+                j += 1
+                if j%10==0:
+                    print(j)
+                state = inital_state.unsqueeze(0)
+                rollout_rewards = []
+                self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
+                for i in range(horizon):
+                    #print(state.shape)
+                    action = get_target_action(state.to('cpu').numpy())
+                
+                    #print(action)
+                    #print()
+                    pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
+                    action = tf_to_torch(action).to(self.device)
+                    state = state.to(self.device)
+                    next_state = self.dynamics_model(state, action)
+                    rollout_rewards.append(pred_reward * (discount**i))
+                    state = next_state
+                model_rewards.append(sum(rollout_rewards))
+                if j ==20:
+                    break
+            mean_model_rewards = np.mean(np.asarray(model_rewards))
+            std_model_rewards = np.std(np.asarray(model_rewards))
+            return mean_model_rewards, std_model_rewards
+
 
     def sample_initial_states(self, initial_mask, min_distance=50, num_samples=20):
         # Find all initial state indices
@@ -467,21 +668,13 @@ class ModelBased2(object):
 
         # Define the checkpoint
         if self.use_reward_model:
-            checkpoint = {
-                "dynamics_model_state_dict": self.dynamics_model.state_dict(),
-                "reward_model_state_dict": self.reward_model.state_dict(),
-                "done_model_state_dict": self.done_model.state_dict(),
-                # Add other things to save if necessary
-            }
+            # throw not impleemneted error
+            raise NotImplementedError
         else:
-            checkpoint = {
-                "dynamics_model_state_dict": self.dynamics_model.state_dict(),
-                # Add other things to save if necessary
-            }
-        # Save the checkpoint
-        torch.save(checkpoint, os.path.join(save_path, filename))
-    
-    def load(self, checkpoint_path):
+            self.dynamics_model.save(save_path, filename)
+
+
+    def load(self, checkpoint_path, filename):
         """
         Load the model's state dictionaries from a checkpoint.
         
@@ -490,10 +683,11 @@ class ModelBased2(object):
         """
 
         # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path)
+        # checkpoint = torch.load(checkpoint_path)
 
         # Restore the state dictionaries
-        self.dynamics_model.load_state_dict(checkpoint["dynamics_model_state_dict"])
+        self.dynamics_model.load(checkpoint_path, filename) #checkpoint["dynamics_model_state_dict"])
+        """
         if self.use_reward_model:
             self.reward_model.load_state_dict(checkpoint["reward_model_state_dict"])
             self.done_model.load_state_dict(checkpoint["done_model_state_dict"])
@@ -503,3 +697,4 @@ class ModelBased2(object):
         if self.use_reward_model:
             self.reward_model.to(self.device)
             self.done_model.to(self.device)
+        """
