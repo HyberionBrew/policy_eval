@@ -195,6 +195,7 @@ class GroundTruthReward(object):
         #print(np.array([observation_dict['poses_x'][0], observation_dict['poses_y'][0]]))
         reward, _ = self.reward(observation_dict, raw_action, 
                                       collision, done)
+        # print("R:", reward)
         return reward
     
     def reset(self, pose , velocity=1.5):
@@ -205,7 +206,7 @@ class GroundTruthReward(object):
         pose = self.dataset.unnormalize_states(states)[0][:2]
         self.reward.reset(pose, velocity=velocity)
 
-standard_config = {
+progress_config = {
     "collision_penalty": 0.0,
     "progress_weight": 1.0,
     "raceline_delta_weight": 0.0,
@@ -218,6 +219,36 @@ standard_config = {
     "inital_velocity": 1.5,
     "normalize": False,
 }
+
+raceline_config = {
+    "collision_penalty": 0.0,
+    "progress_weight": 0.0,
+    "raceline_delta_weight": 1.0,
+    "velocity_weight": 0.0,
+    "steering_change_weight": 0.0,
+    "velocity_change_weight": 0.0,
+    "pure_progress_weight": 0.0,
+    "min_action_weight" : 0.0,
+    "min_lidar_ray_weight" : 0.0, #missing
+    "inital_velocity": 1.5,
+    "normalize": False,
+}
+
+
+min_action_config = {
+    "collision_penalty": 0.0,
+    "progress_weight": 0.0,
+    "raceline_delta_weight": 0.0,
+    "velocity_weight": 0.0,
+    "steering_change_weight": 0.0,
+    "velocity_change_weight": 0.0,
+    "pure_progress_weight": 0.0,
+    "min_action_weight" : 1.0,
+    "min_lidar_ray_weight" : 0.0, #missing
+    "inital_velocity": 1.5,
+    "normalize": False,
+}
+
 
 def dynamic_xavier_init(scale):
     def _initializer(m):
@@ -312,7 +343,7 @@ class ModelBasedEnsemble(object):
 class ModelBased2(object):
     def __init__(self, state_dim, action_dim, hidden_size, dt,
                  logger, dataset, min_state, max_state, use_reward_model=False,
-                 learning_rate=1e-3, weight_decay=1e-4,):
+                 learning_rate=1e-3, weight_decay=1e-4,target_reward=None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.state_dim, self.action_dim, self.hidden_size, self.dt = state_dim, action_dim, hidden_size, dt
         self.dynamics_model = ModelBasedEnsemble(state_dim, 
@@ -337,7 +368,18 @@ class ModelBased2(object):
             self.done_model.to(self.device)
         
         else:
-            self.reward_model = GroundTruthReward("Infsaal",dataset,20, **standard_config)
+            # TODO! think about how to do better here
+            if target_reward=="trajectories_td_prog.zarr":
+                print("[mb] Using progress reward")
+                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **progress_config)
+            elif target_reward=="trajectories_raceline.zarr":
+                print("[mb] Using raceline reward")
+                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **raceline_config)
+            elif target_reward=="trajectories_min_act.zarr":
+                print("[mb]Using min action reward")
+                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **min_action_config)
+            else:
+                raise NotImplementedError
 
         self.writer=logger
         
@@ -449,12 +491,12 @@ class ModelBased2(object):
 
             # loop over the inital states
             model_rewards = []
-            print(len(inital_states))
+            # print(len(inital_states))
             j = 0
             for inital_state in inital_states: # loop over batch dimension
                 j += 1
-                if j%10==0:
-                    print(j)
+                #if j%10==0:
+                #    print(j)
                 state = inital_state.unsqueeze(0)
                 rollout_rewards = []
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
@@ -471,10 +513,12 @@ class ModelBased2(object):
                     rollout_rewards.append(pred_reward * (discount**i))
                     state = next_state
                 model_rewards.append(sum(rollout_rewards))
-                if j ==20:
-                    break
-            mean_model_rewards = np.mean(np.asarray(model_rewards))
-            std_model_rewards = np.std(np.asarray(model_rewards))
+                #break
+                #if j ==100:
+                #    break
+            # print(model_rewards)
+            mean_model_rewards = np.mean(np.asarray(model_rewards)) * (1 - discount)
+            std_model_rewards = np.std(np.asarray(model_rewards)) * (1 - discount)
             return mean_model_rewards, std_model_rewards
 
 
