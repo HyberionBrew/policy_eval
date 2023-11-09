@@ -209,6 +209,26 @@ def main(_):
   print(behavior_dataset.reward_mean, behavior_dataset.reward_std,
         behavior_dataset.state_mean,
       behavior_dataset.state_std,)
+  if False:
+      evaluation_dataset = F110Dataset(
+        env,
+        normalize_states=FLAGS.normalize_states,
+        normalize_rewards=FLAGS.normalize_rewards,
+        noise_scale=FLAGS.noise_scale,
+        bootstrap=FLAGS.bootstrap,
+        debug=False,
+        path = f"/app/ws/f1tenth_orl_dataset/data/trajectories_test.zarr", #trajectories.zarr",
+         #['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        scans_as_states=False,
+        alternate_reward=FLAGS.alternate_reward,
+        include_timesteps_in_obs = True,
+        reward_mean = behavior_dataset.reward_mean,
+        reward_std = behavior_dataset.reward_std,
+        state_mean = behavior_dataset.state_mean,
+        state_std = behavior_dataset.state_std,
+        )
+      eval_datasets.append(evaluation_dataset)
+  
   if True:
     for i, agent in enumerate(eval_agents):
       evaluation_dataset = F110Dataset(
@@ -245,17 +265,18 @@ def main(_):
                       max_state=max_state, logger=writer, 
                       dataset=behavior_dataset,
                       learning_rate=FLAGS.lr,
-                      weight_decay=FLAGS.weight_decay)
+                      weight_decay=FLAGS.weight_decay,
+                      target_reward="trajectories_td_prog.zarr")
   else:
     # print a warning
     print("[WARNING] Using old model!!")
     model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
                         env.action_spec().shape[1], learning_rate=FLAGS.lr,
                         weight_decay=FLAGS.weight_decay)
-
+    
   
   if FLAGS.load_mb_model:
-    model.load("/app/ws/logdir/mb/mb_model_130000", "new_model")
+    model.load("/app/ws/logdir/mb/mb_model_50000", "new_model")
 
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
@@ -286,8 +307,11 @@ def main(_):
         laser_scan = scans[start_idx:end_idx]
       else:
         laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+        #print("Scan 1")
+        #print(laser_scan)
         laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
-
+        #print("Scan 2")
+        #print(laser_scan)
       # back to dict
       model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
       # normalize back to model input
@@ -295,7 +319,9 @@ def main(_):
      
       # now also append the laser scan
       model_input_dict['lidar_occupancy'] = laser_scan
-      # print(model_input_dict)
+      #print("model input dict")
+      #print(model_input_dict)
+
       batch_actions = actor(
         model_input_dict,
         std=FLAGS.target_policy_std)[1]
@@ -314,8 +340,8 @@ def main(_):
     (states, scans, actions, next_states, next_scans, rewards, masks, weights,
      log_prob, timesteps) = next(tf_dataset_iter)
 
-    if not(FLAGS.load_mb_model):
-      model.update(states, actions, next_states, rewards, masks,
+    #if not(FLAGS.load_mb_model):
+    model.update(states, actions, next_states, rewards, masks,
                   weights)
 
   gc.collect()
@@ -332,7 +358,7 @@ def main(_):
     if i % FLAGS.eval_interval == 0:
       horizon = 500
       print("Starting evaluation")
-      if False:
+      if True:
 
         for j, evaluation_dataset in enumerate(eval_datasets):
           eval_ds = model.evaluate(evaluation_dataset.states,
@@ -347,23 +373,34 @@ def main(_):
                                   min_state=min_state,
                                   max_state=max_state,)
         
-      pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
-                             behavior_dataset.initial_weights,
-                             get_target_actions, horizon=10,
-                             discount=FLAGS.discount,)
+      #pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
+      #                       behavior_dataset.initial_weights,
+      #                       get_target_actions, horizon=100,
+      #                       discount=FLAGS.discount,)
       print("*returns*")
-      print(pred_returns)
-      print(std)
-      model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-                              horizon=25, num_samples=100)
+      #print(pred_returns)
+      #print(std)
+      #model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
+      #                        horizon=25, num_samples=100)
       # exit()
-      model.plot_rollouts_fixed(behavior_dataset.states,
-                    behavior_dataset.actions,
-                    behavior_dataset.mask_inital,
+      evaluation_dataset_ = eval_datasets[0]
+      model.plot_rollouts_fixed(evaluation_dataset_.states,
+                    evaluation_dataset_.actions,
+                    evaluation_dataset_.mask_inital,
                     min_state, max_state, 
-                    horizon= 500,
+                    horizon= 50,
                     num_samples=10,
-                    path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch_find.png")#np.max(behavior_dataset.steps) + 1)
+                    path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911.png",
+                    get_target_action=get_target_actions)#np.max(behavior_dataset.steps) + 1)
+      print("----")
+      model.plot_rollouts_fixed(evaluation_dataset_.states,
+              evaluation_dataset_.actions,
+              evaluation_dataset_.mask_inital,
+              min_state, max_state, 
+              horizon= 50,
+              num_samples=10,
+              path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911_fixed.png",
+              get_target_action=None)#np.max(behavior_dataset.steps) + 1)
 
 
       model.save(f"/app/ws/logdir/mb/mb_model_{i}", "new_model")

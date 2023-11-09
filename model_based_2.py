@@ -432,7 +432,7 @@ class ModelBased2(object):
     
     def plot_rollouts_fixed(self, states, actions, inital_mask, min_state, max_state, 
                             clip=True, horizon=1000, num_samples=20, 
-                            path="logdir/plts/mb/rollouts_mb.png", get_target_action=None):
+                            path="logdir/plts/mb/rollouts_mb.png", get_target_action=None,scans=None):
         with torch.no_grad():
             states = tf_to_torch(states)
             actions = tf_to_torch(actions)
@@ -442,8 +442,10 @@ class ModelBased2(object):
             max_state = tf_to_torch(max_state).to(self.device)
 
             
-            
+            #TODO! remove debug
             sampled_initial_indices = self.sample_initial_states(inital_mask, min_distance=horizon, num_samples=num_samples)
+            #sampled_initial_indices = [1]#,1,2,3]
+            #print(sampled_initial_indices)
             sampled_states = states[sampled_initial_indices]
             
             plt.figure(figsize=(12, 6))
@@ -465,9 +467,16 @@ class ModelBased2(object):
                 current_state = states[start_idx].unsqueeze(0).to(self.device)  # make it (1, state_dim)
                 for i in range(horizon):
                     if get_target_action is None:
+                        
                         action = actions[start_idx + i].unsqueeze(0).to(self.device)
+                        #if i == 0:
+                        #    print("State", current_state)
+                        #    print("action", action)
                     else:
-                        action = get_target_action(current_state.to('cpu').numpy())
+                        action = get_target_action(current_state.to('cpu').numpy() )
+                        #if i == 0:
+                        #    print("State", current_state)
+                        #    print("action", action)
                         action = tf_to_torch(action).to(self.device)
 
                     current_state = self.dynamics_model(current_state, action)

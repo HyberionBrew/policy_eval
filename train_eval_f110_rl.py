@@ -23,7 +23,7 @@ import tensorflow as tf
 from utils import plot_reward_heatmap
 gpu_memory = 24576 # GPU memory available on the machine
 # 45% of the memory, this way we can launch a second process on the same GPU
-allowed_gpu_memory = gpu_memory * 0.25
+allowed_gpu_memory = gpu_memory * 0.125
 gpus = tf.config.experimental.list_physical_devices('GPU')
 
 if gpus:
@@ -75,8 +75,9 @@ from policy_eval.dataset import Dataset
 from policy_eval.dual_dice import DualDICE
 from policy_eval.model_based import ModelBased
 from policy_eval.q_fitter import QFitter
-
+from model_based_2 import ModelBased2
 from ftg_agents.agents import *
+from tensorboardX import SummaryWriter
 
 from f110_orl_dataset.normalize_dataset import Normalize
 from f110_orl_dataset.dataset_agents import F110Actor,F110Stupid
@@ -164,9 +165,34 @@ def main(_):
       print(e, " GPUs must be set at program startup")
   
   """
+  # set the correct save experiment directory
+  experiment_directory = "0211"
+  save_directory = os.path.join(FLAGS.save_dir, experiment_directory)
+  if not os.path.exists(save_directory):
+    os.makedirs(save_directory)
+  # now the algo directory
+  save_directory = os.path.join(save_directory, f"{FLAGS.algo}")
+  if not os.path.exists(save_directory):
+    os.makedirs(save_directory)
+  # path
+  save_directory = os.path.join(save_directory, f"{FLAGS.path}")
+  if not os.path.exists(save_directory):
+    os.makedirs(save_directory)
+
+  #now the max_timesteps directory
+  save_directory = os.path.join(save_directory, f"{FLAGS.clip_trajectory_max}")
+  if not os.path.exists(save_directory):
+    os.makedirs(save_directory)
+  # now the target policy directory
+  save_directory = os.path.join(save_directory, f"{FLAGS.target_policy}")
+  if not os.path.exists(save_directory):
+    os.makedirs(save_directory)
+  
+  # create the directory if it does not exist
+
   tf.random.set_seed(FLAGS.seed)
   # import f110
-
+  
 
   # get current system time
   import datetime
@@ -177,8 +203,10 @@ def main(_):
       seed=FLAGS.seed, env_name=FLAGS.env_name, algo=FLAGS.algo,
       target_policy=FLAGS.target_policy, 
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
+  
+  
   summary_writer = tf.summary.create_file_writer(
-      os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_{FLAGS.algo}_{FLAGS.path}_{FLAGS.clip_trajectory_max}_1030_fqe", hparam_str))
+      os.path.join(save_directory, hparam_str))
   summary_writer.set_as_default()
 
   if FLAGS.f110:
@@ -206,13 +234,12 @@ def main(_):
         bootstrap=FLAGS.bootstrap,
         debug=False,
         path = f"/app/ws/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
-        exclude_agents = ['progress_weight', 'raceline_delta_weigh', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+        exclude_agents = ['progress_weight', 'raceline_delta_weight', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
         scans_as_states=False,
         alternate_reward=FLAGS.alternate_reward,
         include_timesteps_in_obs = True,
         only_terminals=True,
         clip_trajectory_length= clip_trajectory_length,
-  
         )
     
     """
@@ -280,11 +307,26 @@ def main(_):
                     timestep_constant = behavior_dataset.timestep_constant)
 
   elif 'mb' in FLAGS.algo:
-    model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
-                       env.action_spec().shape[1], learning_rate=FLAGS.lr,
-                       weight_decay=FLAGS.weight_decay)
+    #model = ModelBased(behavior_dataset.states.shape[1], #env.observation_spec().shape[0],
+    #                   env.action_spec().shape[1], learning_rate=FLAGS.lr,
+    #                   weight_decay=FLAGS.weight_decay)
+    min_state = tf.reduce_min(behavior_dataset.states, 0)
+    max_state = tf.reduce_max(behavior_dataset.states, 0)
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"mb_latest", "ensemble_"+hparam_str))
+    model = ModelBased2(behavior_dataset.states.shape[1],
+                      env.action_spec().shape[1], [256,256,256,256], 
+                      dt=1/20, 
+                      min_state=min_state, 
+                      max_state=max_state, logger=writer, 
+                      dataset=behavior_dataset,
+                      learning_rate=FLAGS.lr,
+                      weight_decay=FLAGS.weight_decay,
+                      target_reward=FLAGS.path)
+    #if FLAGS.load_mb_model:
+    #  model.load("/app/ws/logdir/mb/mb_model_250000")
     if FLAGS.load_mb_model:
-      model.load("/app/ws/logdir/mb/mb_model_250000")
+      model.load("/app/ws/logdir/mb/mb_model_130000", "new_model")
+  
   elif 'dual_dice' in FLAGS.algo:
     model = DualDICE(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
                      env.action_spec().shape[1], FLAGS.weight_decay)
@@ -422,7 +464,7 @@ def main(_):
       next_actions = get_target_actions(next_states, scans=next_scans)
 
       model.update(states, actions, next_states, next_actions, rewards, masks,
-                   weights, FLAGS.discount, min_reward, max_reward, timesteps)
+                   weights, FLAGS.discount, min_reward, max_reward, timesteps=timesteps)
 
     elif 'mb' in FLAGS.algo or 'hybrid' in FLAGS.algo:
       if not(FLAGS.load_mb_model):
@@ -451,7 +493,9 @@ def main(_):
   gc.collect()
 
   for i in tqdm.tqdm(range(FLAGS.num_updates), desc='Running Training',  mininterval=5.0):
-    update_step()
+    if not FLAGS.load_mb_model:
+      # skip if we load a mb model
+      update_step()
 
     if i % FLAGS.eval_interval == 0:
       if 'fqe' in FLAGS.algo:
@@ -475,70 +519,28 @@ def main(_):
           
           """
       elif 'mb' in FLAGS.algo:
-        horizon = 1000
-        print("Getting rewards")
-        """
-        get_rewards = model.get_rewards(behavior_dataset.states,
-                                behavior_dataset.initial_weights,
-                                    get_target_actions,
-                                    FLAGS.discount,
-                                    min_reward, max_reward,
-                                    min_state, max_state, 
-                                    horizon= horizon)#np.max(behavior_dataset.steps) + 1)
-        rewards_states = model.compute_rewards_for_states(behavior_dataset.states,
-                                         get_target_actions)
-        plot_reward_heatmap(behavior_dataset.states.cpu().numpy()[::1000], 
-                            rewards_states, 
-                            bins=150, 
-                            name=f"logdir/plts/mb/mb_pure_rewards_{FLAGS.target_policy}_{FLAGS.discount}_{i}")
-        """
-
-
-
-       
+        horizon = FLAGS.clip_trajectory_max      
         
-  	    # print("Plotting rollouts")
-        model.plot_rollouts(behavior_dataset.states,
-                            behavior_dataset.initial_weights,
-                            get_target_actions,
-                            FLAGS.discount,
-                            min_reward, max_reward,
-                            min_state, max_state, 
-                            horizon= 50,
-                            path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_new.png")#np.max(behavior_dataset.steps) + 1)
+        pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
+                        behavior_dataset.initial_weights,
+                        get_target_actions, horizon=50,
+                        discount=FLAGS.discount,)
+        print(pred_returns)
+        print(std)
+        #exit()
+        #pred_returns = behavior_dataset.unnormalize_rewards(pred_returns)
+        #std = behavior_dataset.unnormalize_rewards(std)
+        tf.summary.scalar('train/pred returns', pred_returns, step=i)
+        tf.summary.scalar('train/pred std', std, step=i)
         
-        print("got rewards")
-        # print(get_rewards.shape)
-        #plot_reward_heatmap(behavior_dataset.states.cpu().numpy(), 
-        #                    get_rewards.cpu().numpy(), 
-        #                    bins=150, name=f"logdir/plts/mb/mb_{FLAGS.target_policy}_{FLAGS.discount}_{i}")
-        print("pred returns")
-        pred_returns = model.estimate_returns(behavior_dataset.initial_states,
-                                              behavior_dataset.initial_weights,
-                                              get_target_actions,
-                                              FLAGS.discount,
-                                              min_reward, max_reward,
-                                              min_state, max_state, 
-                                              horizon= horizon)#np.max(behavior_dataset.steps) + 1)
-        
-        # have estimate for 50 timesteps? but only count the last 30? 
-        
-        pred_mean_returns, pred_std_returns = model.estimate_mean_returns(behavior_dataset.initial_states,
-                                                                          behavior_dataset.initial_weights,
-                                                                          get_target_actions,
-                                                                          FLAGS.discount,
-                                                                          min_reward, max_reward,
-                                                                          min_state, max_state, 
-                                                                          horizon= 50, 
-                                                                          settle_timesteps = 0)  
-        pred_mean_returns = behavior_dataset.unnormalize_rewards(pred_mean_returns)
-        pred_std_returns = behavior_dataset.unnormalize_rewards(pred_std_returns)
-        tf.summary.scalar('train/pred mean returns (MB)', pred_mean_returns, step=i)
-        tf.summary.scalar('train/pred std returns (MB)', pred_std_returns, step=i)
+        model.plot_rollouts_fixed(behavior_dataset.states,
+                      behavior_dataset.actions,
+                      behavior_dataset.mask_inital,
+                      min_state, max_state, 
+                      horizon= horizon,
+                      num_samples=10,
+                      path = f"logdir/plts/mb/mb_rollouts_{FLAGS.path}_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch_find.png")#np.max(behavior_dataset.steps) + 1)
 
-        model.save(f"/app/ws/logdir/mb/mb_model_{i}")
-        # print saved model
-        print(f"saved model as /app/ws/logdir/mb/mb_model_{i}")
 
       elif FLAGS.algo in ['dual_dice']:
         pred_returns, pred_ratio = model.estimate_returns(iter(tf_dataset))
@@ -576,7 +578,8 @@ def main(_):
           plot_reward_heatmap(behavior_dataset.states.cpu().numpy(), all_returns.cpu().numpy(), bins=150, name=f"logdir/plts/fqe_{i}_{FLAGS.target_policy}_{FLAGS.discount}")
           print("fqe std_deviation", behavior_dataset.unnormalize_rewards(std_deviation))
           #print("q values")
-          q_values = (model(behavior_dataset.states, behavior_dataset.actions) /
+          q_values = (model(behavior_dataset.states, behavior_dataset.actions, 
+                            timesteps=behavior_dataset.timesteps) /
                       (1 - discount))
           #print("got q_vals")
           n_samples = 10
@@ -584,7 +587,8 @@ def main(_):
                           for _ in range(n_samples)]
           #print("next q_vals")
           next_q_values = sum(
-              [model(behavior_dataset.next_states, next_action) / (1 - discount)
+              [model(behavior_dataset.next_states, next_action, 
+                     timesteps=behavior_dataset.timesteps+behavior_dataset.timestep_constant) / (1 - discount)
                for next_action in next_actions]) / n_samples
           print("got next q_vals")
           rewards = rewards + discount * next_q_values - q_values
@@ -594,6 +598,7 @@ def main(_):
         # restructure the dataset as [num_trajectories, num_steps].
         num_trajectories = len(behavior_dataset.initial_states)
         max_trajectory_length = np.max(behavior_dataset.steps) + 1
+        print("max, len", max_trajectory_length)
         trajectory_weights = behavior_dataset.initial_weights
         trajectory_starts = np.where(np.equal(behavior_dataset.steps, 0))[0]
 
@@ -632,10 +637,10 @@ def main(_):
                                 np.sum(trajectory_values * trajectory_weights) /
                                 np.sum(trajectory_weights))
         pred_returns = offset + avg_trajectory_value
+      if not(FLAGS.algo == 'mb'):
+        pred_returns = behavior_dataset.unnormalize_rewards(pred_returns)
 
-      pred_returns = behavior_dataset.unnormalize_rewards(pred_returns)
-
-      tf.summary.scalar('train/pred returns', pred_returns, step=i)
+        tf.summary.scalar('train/pred returns', pred_returns, step=i)
       logging.info('pred returns=%f', pred_returns)
 
 
