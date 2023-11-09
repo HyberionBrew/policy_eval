@@ -21,6 +21,30 @@ def tf_to_torch(tf_tensor):
     return torch_tensor
 
 import torch.nn.init as init
+
+
+"""
+A network that takes in the current x,y state and outputs the sin and cos of the progress
+"""
+class ProgressNetwork(nn.Module):
+    def __init__(self, input_size=2, hidden_size=64, output_size=2):
+        super(ProgressNetwork, self).__init__()
+        # Define the architecture here
+        self.fc1 = nn.Linear(input_size, hidden_size)  # First fully connected layer
+        self.fc2 = nn.Linear(hidden_size, hidden_size) # Second fully connected layer
+        self.fc3 = nn.Linear(hidden_size, output_size) # Output layer
+
+    def forward(self, x):
+        # Define the forward pass
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        # Output layer without an activation function
+        x = self.fc3(x)
+        # Normalize the output to lie on the unit circle
+        # This enforces the sin^2(theta) + cos^2(theta) = 1 constraint
+        x = F.normalize(x, p=2, dim=1)
+        return x
+
 class DynamicsModel(nn.Module):
     def __init__(self, state_size, action_size, hidden_size, dt, min_state, max_state):
         
@@ -52,6 +76,8 @@ class DynamicsModel(nn.Module):
         # maybe also remove this
         self.STATE_PREVIOUS_ACTION_STEERING = 7
         self.STATE_PREVIOUS_ACTION_VELOCITY = 8
+
+        self.progress_model = ProgressNetwork(input_size=2, hidden_size=64, output_size=2)
     
     def _make_layer(self, in_dim, out_dim):
         layer = nn.Linear(in_dim, out_dim)
@@ -64,9 +90,8 @@ class DynamicsModel(nn.Module):
         :param x: a batch of states
         :param u: a batch of actions
         """
-        #print(x.shape)
-        #print(u.shape)
-
+        #in order to make learning easier apply to the u the clipping and scaling
+        # u = torch.clip(u, -1, 1) * 0.05
         xu = torch.cat((x, u), -1)
         xu[:, self.STATE_X:self.STATE_Y+1] = 0  # Remove dependency in (x,y)
         xu[:, self.STATE_PROGRESS_SIN:self.STATE_PROGRESS_COS+1] = 0  # Remove dependency in progress
@@ -92,9 +117,17 @@ class DynamicsModel(nn.Module):
         
         dx = A @ x.unsqueeze(-1) + B @ u.unsqueeze(-1)
         x = x + dx.squeeze()*self.dt
+
+        # now apply the progress model to x
+        progress = self.progress_model(x[:, self.STATE_X:self.STATE_Y+1])
+        # Create a mask for the indices that you want to update
+        x_new = x.clone()
+        x_new[:, self.STATE_PROGRESS_SIN:self.STATE_PROGRESS_COS+1] = progress
+        
+        #x[:, self.STATE_PROGRESS_SIN:self.STATE_PROGRESS_COS+1] = progress
         # clip the state between min and maxstate
-        x = torch.clamp(x, self.min_state, self.max_state)
-        return x
+        x_new = torch.clamp(x_new, self.min_state, self.max_state)
+        return x_new
 
 
 class DynamicsModelPolicy(object):
@@ -258,6 +291,28 @@ def dynamic_xavier_init(scale):
                 init.zeros_(m.bias)
     return _initializer
 
+
+
+
+"""
+The new dynamics model works like this:
+0. the target action is computed from the previous action and the new action
+1. delta x, delta y are predicted from previous theta, lin_vel, & target action
+2. delta_theta_s, delta_theta_c are predicted with from the same states as above
+(),out normalized to fullfill cos^2 + sin^2 = 1
+3. Linear_vels are predicted from the same states as above (so no x,y, prev_action (rather target action))
+4. Prev_action is computed outside the dynamics model
+5. progress is computed by (x,y) Network
+"""
+class NewDynamicsModel(nn.Module):
+    def __init__(self):
+        # X,Y Prediction network
+        super().__init__()
+        pass
+    def forward(self,x,u):
+        #from x and u compute the target action
+        target_action = x[:, 7:9] + u # this doesnt work we first need to unnormalize
+        pass
 
 class ModelBasedEnsemble(object):
     def __init__(self, state_dim, action_dim, hidden_size,  dt, min_state, max_state,
@@ -555,7 +610,7 @@ class ModelBased2(object):
         return sampled_indices
     
     def evaluate_rollouts(self, dataset,unnormalize_fn,
-                           horizon=100, num_samples=20, discount=1.0, ):
+                           horizon=100, num_samples=20, discount=1.0, get_target_action=None ):
         """
         Evaluate the rollouts using the learned dynamics model. And the fixed GT model.
         """
@@ -616,7 +671,12 @@ class ModelBased2(object):
                 # but should be unnecessary for used rewards aorn
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
                 for i in range(horizon):
-                    action = actions[idx + i].unsqueeze(0)
+                    if get_target_action is None:
+                        action = actions[idx + i].unsqueeze(0)
+                    else:
+                        action = get_target_action(state.to('cpu').numpy())
+                        action = tf_to_torch(action).to(self.device)
+
                     #print("action", action)
                     
                     #action_raw = raw_actions[idx + i].unsqueeze(0).cpu().numpy()
@@ -634,10 +694,14 @@ class ModelBased2(object):
             # then compare the two means
             # write to tensorboard
             mean_gt_rewards = mean_gt_rewards.cpu().numpy()
-            self.writer.add_scalar('test/mean_gt_rewards', mean_gt_rewards, global_step=self.dynamics_optimizer_iterations)
-            self.writer.add_scalar('test/mean_model_rewards', mean_model_rewards, global_step=self.dynamics_optimizer_iterations)
+            tag= ""
+            if get_target_action is not None:
+                tag = "_model_action"
+
+            self.writer.add_scalar(f"test/mean_gt_rewards{tag}", mean_gt_rewards, global_step=self.dynamics_optimizer_iterations)
+            self.writer.add_scalar(f"test/mean_model_rewards{tag}", mean_model_rewards, global_step=self.dynamics_optimizer_iterations)
             diff = mean_gt_rewards - mean_model_rewards
-            self.writer.add_scalar('test/model_diff', diff, global_step=self.dynamics_optimizer_iterations)
+            self.writer.add_scalar(f"test/model_diff{tag}", diff, global_step=self.dynamics_optimizer_iterations)
             print(diff)
             print(mean_gt_rewards)
             print(mean_model_rewards)

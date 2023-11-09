@@ -175,7 +175,7 @@ def main(_):
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
 
   if use_torch:
-    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_0211", "ensemble_"+hparam_str))
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_0211", "ensemble2_"+hparam_str))
   else:
       summary_writer = tf.summary.create_file_writer(
       os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_0211", "ensemble_"+hparam_str))
@@ -276,7 +276,7 @@ def main(_):
     
   
   if FLAGS.load_mb_model:
-    model.load("/app/ws/logdir/mb/mb_model_50000", "new_model")
+    model.load("/app/ws/logdir/mb/mb_model_110000", "new_model")
 
 
   min_reward = tf.reduce_min(behavior_dataset.rewards)
@@ -380,15 +380,18 @@ def main(_):
       print("*returns*")
       #print(pred_returns)
       #print(std)
-      #model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-      #                        horizon=25, num_samples=100)
+      model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
+                              horizon=50, num_samples=100)
+      
+      model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
+                              horizon=50, num_samples=100, get_target_action = get_target_actions)
       # exit()
       evaluation_dataset_ = eval_datasets[0]
       model.plot_rollouts_fixed(evaluation_dataset_.states,
                     evaluation_dataset_.actions,
                     evaluation_dataset_.mask_inital,
                     min_state, max_state, 
-                    horizon= 50,
+                    horizon= 500,
                     num_samples=10,
                     path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911.png",
                     get_target_action=get_target_actions)#np.max(behavior_dataset.steps) + 1)
@@ -397,7 +400,7 @@ def main(_):
               evaluation_dataset_.actions,
               evaluation_dataset_.mask_inital,
               min_state, max_state, 
-              horizon= 50,
+              horizon= 500,
               num_samples=10,
               path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911_fixed.png",
               get_target_action=None)#np.max(behavior_dataset.steps) + 1)
