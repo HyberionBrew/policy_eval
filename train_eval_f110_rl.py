@@ -166,7 +166,7 @@ def main(_):
   
   """
   # set the correct save experiment directory
-  experiment_directory = "0211"
+  experiment_directory = "0911_2"
   save_directory = os.path.join(FLAGS.save_dir, experiment_directory)
   if not os.path.exists(save_directory):
     os.makedirs(save_directory)
@@ -325,7 +325,7 @@ def main(_):
     #if FLAGS.load_mb_model:
     #  model.load("/app/ws/logdir/mb/mb_model_250000")
     if FLAGS.load_mb_model:
-      model.load("/app/ws/logdir/mb/mb_model_130000", "new_model")
+      model.load("/app/ws/logdir/mb/mb_model_110000", "new_model")
   
   elif 'dual_dice' in FLAGS.algo:
     model = DualDICE(behavior_dataset.states.shape[1],#env.observation_spec().shape[0],
@@ -502,6 +502,15 @@ def main(_):
         pred_returns,_ = model.estimate_returns(behavior_dataset.initial_states,
                                               behavior_dataset.initial_weights,
                                               get_target_actions)
+        print(behavior_dataset.times)
+        #pred_returns_fqe_mb = MBFQERollout(model_mb, 
+        #                                   model_fqe, 
+        #                                   behavior_dataset, 
+        #                                   get_target_actions, 
+        #                                   discount=FLAGS.discount,
+        #                                   horizon = 10,
+        #                                   dt = behavior_dataset.timestep_constant)
+
         if (i % FLAGS.eval_interval*2) == 0:
           model.save(f"/app/ws/logdir/{FLAGS.target_policy}/fqe_model_{i}_{FLAGS.clip_trajectory_max}_{FLAGS.target_policy}")
       elif 'hybrid' in FLAGS.algo:
@@ -523,7 +532,7 @@ def main(_):
         
         pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
                         behavior_dataset.initial_weights,
-                        get_target_actions, horizon=50,
+                        get_target_actions, horizon=horizon,
                         discount=FLAGS.discount,)
         print(pred_returns)
         print(std)

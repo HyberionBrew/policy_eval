@@ -547,6 +547,74 @@ class ModelBased2(object):
             plt.title("Rollouts using Given Actions (torch)")
             plt.savefig(path)
             plt.show()
+    
+    def rollout(self, dataset,
+                horizon=100, num_samples=20, discount=1.0, get_target_action=None):
+        """
+        Evaluate the rollouts using the learned dynamics model. And the fixed GT model.
+        """
+        with torch.no_grad():
+            states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
+            states = tf_to_torch(states).to(self.device)
+            actions = tf_to_torch(actions).to(self.device)
+            rewards = tf_to_torch(rewards).to(self.device)
+            # inital_mask = tf_to_torch(inital_mask).to(self.device)
+            sampled_initial_indices = self.sample_initial_states(inital_mask, min_distance=horizon, num_samples=num_samples)
+            # first calculate the ground truth rewards
+            sampled_initial_indices = torch.tensor(sampled_initial_indices)
+            discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
+            gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
+            #print(gt_rewards_segments.cpu().numpy())
+            #print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
+            #print("aaaaa")
+            # print(gt_rewards_segments.shape)
+            gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
+            mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
+            # print(f"Mean GT rewards: {mean_gt_rewards}")
+
+            # next perform rollouts from the sampled_initial_indices with the dynamics model
+            # use the GT reward model to label the rewards of the rollouts and compute the mean
+            # print("Real first reward: ", rewards[sampled_initial_indices[0]])
+            model_rewards = []
+            for idx in sampled_initial_indices:
+                state = states[idx].unsqueeze(0)
+                rollout_rewards = []
+                # TODO! read velocity from state, quo vadis velocity?, 
+                # but should be unnecessary for used rewards aorn
+                self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
+                for i in range(horizon):
+                    if get_target_action is None:
+                        action = actions[idx + i].unsqueeze(0)
+                    else:
+                        action = get_target_action(state.to('cpu').numpy())
+                        action = tf_to_torch(action).to(self.device)
+                    next_state = self.dynamics_model(state, action)
+                    # can calculate action_raw by taking current action adding to previous_action observation
+                    pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
+                    rollout_rewards.append(pred_reward * (discount**i))
+                    state = next_state
+                    #print(f"State {i} : {state}")
+                    #print(f"Reward prediction: {pred_reward}")
+                model_rewards.append(sum(rollout_rewards))
+
+            mean_model_rewards = np.mean(np.asarray(model_rewards))
+            # then compare the two means
+            # write to tensorboard
+            mean_gt_rewards = mean_gt_rewards.cpu().numpy()
+            tag= ""
+            if get_target_action is not None:
+                tag = "_model_action"
+
+            self.writer.add_scalar(f"test/mean_gt_rewards{tag}", mean_gt_rewards, global_step=self.dynamics_optimizer_iterations)
+            self.writer.add_scalar(f"test/mean_model_rewards{tag}", mean_model_rewards, global_step=self.dynamics_optimizer_iterations)
+            diff = mean_gt_rewards - mean_model_rewards
+            self.writer.add_scalar(f"test/model_diff{tag}", diff, global_step=self.dynamics_optimizer_iterations)
+            print(diff)
+            print(mean_gt_rewards)
+            print(mean_model_rewards)
+        return mean_gt_rewards, mean_model_rewards
 
     def estimate_returns(self,inital_states, inital_weights, get_target_action, horizon=50, discount=0.99):
         with torch.no_grad():
