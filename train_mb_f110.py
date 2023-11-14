@@ -175,7 +175,7 @@ def main(_):
       std=FLAGS.target_policy_std, time=time, target_policy_noisy=FLAGS.target_policy_noisy, noise_scale=FLAGS.noise_scale)
 
   if use_torch:
-    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_0211", "ensemble2_"+hparam_str))
+    writer = SummaryWriter(log_dir= os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_1411", hparam_str))
   else:
       summary_writer = tf.summary.create_file_writer(
       os.path.join(FLAGS.save_dir, f"f110_rl_{FLAGS.discount}_mb_{FLAGS.path}_test_0211", "ensemble_"+hparam_str))
@@ -249,7 +249,7 @@ def main(_):
         state_std = behavior_dataset.state_std,
         )
       eval_datasets.append(evaluation_dataset)
-      break
+      
 
   print("Finished loading F110 Dataset")
   
@@ -267,7 +267,7 @@ def main(_):
                       dataset=behavior_dataset,
                       learning_rate=FLAGS.lr,
                       weight_decay=FLAGS.weight_decay,
-                      target_reward="trajectories_td_prog.zarr")
+                      target_reward="trajectories_min_act.zarr")
   else:
     # print a warning
     print("[WARNING] Using old model!!")
@@ -359,65 +359,37 @@ def main(_):
     if i % FLAGS.eval_interval == 0:
       horizon = 500
       print("Starting evaluation")
-      if False:
+      if True:
 
         for j, evaluation_dataset in enumerate(eval_datasets):
-          eval_ds = model.evaluate(evaluation_dataset.states,
-                                  evaluation_dataset.actions,
-                                  evaluation_dataset.rewards,
-                                  evaluation_dataset.next_states,
-                                  j,
-                                  eval_agents[j],
-                                  clip=True,
-                                  min_reward=min_reward,
-                                  max_reward=max_reward,
-                                  min_state=min_state,
-                                  max_state=max_state,)
+          eval_ds = model.evaluate_fast(evaluation_dataset,
+                                  behavior_dataset.unnormalize_rewards,
+                                  horizon=50, num_samples=512, 
+                                  get_target_action = None,
+                                  tag = eval_agents[j])
         
-      #pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
-      #                       behavior_dataset.initial_weights,
-      #                       get_target_actions, horizon=100,
-      #                       discount=FLAGS.discount,)
       print("*returns*")
-      #print(pred_returns)
-      #print(std)
+      pred_returns, std = model.estimate_returns(behavior_dataset.initial_states,
+                             behavior_dataset.initial_weights,
+                             get_target_actions, horizon=50,
+                             discount=FLAGS.discount,)
+
+      print("pred returns")
+      print(pred_returns * (1-FLAGS.discount))
+      print("std")
+      print(std * (1-FLAGS.discount))
+
       model.evaluate_fast(eval_datasets[0], 
                           behavior_dataset.unnormalize_rewards,
-                          horizon=50, num_samples=257, 
-                          get_target_action = get_target_actions)
-      #model.evaluate_rollouts_parallel(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-      #                        horizon=50, num_samples=256, get_target_action = get_target_actions)
+                          horizon=50, num_samples=512, 
+                          get_target_action = get_target_actions,
+                          tag="with_target_actions")
+      
       model.plot_rollouts_fast(eval_datasets[0],
                                behavior_dataset.unnormalize_rewards,
                           horizon=50, num_samples=15, 
-                          get_target_action = None)
-      #model.plot_rollouts_fast(eval_datasets[0],
-      #                         behavior_dataset.unnormalize_rewards,
-      #                    horizon=20, num_samples=15, 
-      #                    get_target_action = get_target_actions, use_dynamics=False)
-      exit()
-      model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-                              horizon=50, num_samples=100, get_target_action = get_target_actions)
-      # exit()
-      evaluation_dataset_ = eval_datasets[0]
-      model.plot_rollouts_fixed(evaluation_dataset_.states,
-                    evaluation_dataset_.actions,
-                    evaluation_dataset_.mask_inital,
-                    min_state, max_state, 
-                    horizon= 500,
-                    num_samples=10,
-                    path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911.png",
-                    get_target_action=get_target_actions)#np.max(behavior_dataset.steps) + 1)
-      print("----")
-      model.plot_rollouts_fixed(evaluation_dataset_.states,
-              evaluation_dataset_.actions,
-              evaluation_dataset_.mask_inital,
-              min_state, max_state, 
-              horizon= 500,
-              num_samples=10,
-              path = f"logdir/plts/mb/mb_rollouts_{FLAGS.target_policy}_{FLAGS.discount}_{i}_0911_fixed.png",
-              get_target_action=None)#np.max(behavior_dataset.steps) + 1)
-
+                          get_target_action = None,
+                          plot_name = "../plts/{i}.png")
 
       model.save(f"/app/ws/logdir/mb/mb_model_{i}", "new_model")
       # print saved model

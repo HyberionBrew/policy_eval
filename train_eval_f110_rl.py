@@ -166,7 +166,7 @@ def main(_):
   
   """
   # set the correct save experiment directory
-  experiment_directory = "0911_2"
+  experiment_directory = "1411"
   save_directory = os.path.join(FLAGS.save_dir, experiment_directory)
   if not os.path.exists(save_directory):
     os.makedirs(save_directory)
@@ -321,7 +321,7 @@ def main(_):
                       dataset=behavior_dataset,
                       learning_rate=FLAGS.lr,
                       weight_decay=FLAGS.weight_decay,
-                      target_reward=FLAGS.path)
+                      target_reward=FLAGS.path,)
     #if FLAGS.load_mb_model:
     #  model.load("/app/ws/logdir/mb/mb_model_250000")
     if FLAGS.load_mb_model:
@@ -542,13 +542,12 @@ def main(_):
         tf.summary.scalar('train/pred returns', pred_returns, step=i)
         tf.summary.scalar('train/pred std', std, step=i)
         
-        model.plot_rollouts_fixed(behavior_dataset.states,
-                      behavior_dataset.actions,
-                      behavior_dataset.mask_inital,
-                      min_state, max_state, 
+        model.plot_rollouts_fast(behavior_dataset,
+                                behavior_dataset.unnormalize_rewards,
                       horizon= horizon,
-                      num_samples=10,
-                      path = f"logdir/plts/mb/mb_rollouts_{FLAGS.path}_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch_find.png")#np.max(behavior_dataset.steps) + 1)
+                      num_samples=15,
+                      get_target_action=get_target_actions,
+                      path = f"logdir/plts/mb/mb_rollouts_{FLAGS.path}_{FLAGS.target_policy}_{FLAGS.discount}_{i}_torch.png")#np.max(behavior_dataset.steps) + 1)
 
 
       elif FLAGS.algo in ['dual_dice']:
