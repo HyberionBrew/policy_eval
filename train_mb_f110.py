@@ -90,7 +90,7 @@ import torch
 EPS = np.finfo(np.float32).eps
 FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'f110_gym', 'Name of the environment.')
-flags.DEFINE_string('target_policy', 'velocity', 'Name of target agent')
+flags.DEFINE_string('target_policy', 'progress_weight', 'Name of target agent')
 flags.DEFINE_float('speed', 1.0, 'Mean speed of the car, for the agent') 
 #flags.DEFINE_string('d4rl_policy_filename', None,
 #                    'Path to saved pickle of D4RL policy.')
@@ -249,6 +249,7 @@ def main(_):
         state_std = behavior_dataset.state_std,
         )
       eval_datasets.append(evaluation_dataset)
+      break
 
   print("Finished loading F110 Dataset")
   
@@ -358,7 +359,7 @@ def main(_):
     if i % FLAGS.eval_interval == 0:
       horizon = 500
       print("Starting evaluation")
-      if True:
+      if False:
 
         for j, evaluation_dataset in enumerate(eval_datasets):
           eval_ds = model.evaluate(evaluation_dataset.states,
@@ -380,9 +381,21 @@ def main(_):
       print("*returns*")
       #print(pred_returns)
       #print(std)
-      model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
-                              horizon=50, num_samples=100)
-      
+      model.evaluate_fast(eval_datasets[0], 
+                          behavior_dataset.unnormalize_rewards,
+                          horizon=50, num_samples=257, 
+                          get_target_action = get_target_actions)
+      #model.evaluate_rollouts_parallel(eval_datasets[0], behavior_dataset.unnormalize_rewards,
+      #                        horizon=50, num_samples=256, get_target_action = get_target_actions)
+      model.plot_rollouts_fast(eval_datasets[0],
+                               behavior_dataset.unnormalize_rewards,
+                          horizon=50, num_samples=15, 
+                          get_target_action = None)
+      #model.plot_rollouts_fast(eval_datasets[0],
+      #                         behavior_dataset.unnormalize_rewards,
+      #                    horizon=20, num_samples=15, 
+      #                    get_target_action = get_target_actions, use_dynamics=False)
+      exit()
       model.evaluate_rollouts(eval_datasets[0], behavior_dataset.unnormalize_rewards,
                               horizon=50, num_samples=100, get_target_action = get_target_actions)
       # exit()

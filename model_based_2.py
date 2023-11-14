@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import random
-
+import matplotlib.cm as cm
 def tf_to_torch(tf_tensor):
     """
     Convert a TensorFlow tensor to a PyTorch tensor.
@@ -187,6 +187,64 @@ from f110_orl_dataset.reward import MixedReward
 import gymnasium as gym
 
 from f110_orl_dataset.normalize_dataset import Normalize
+from f110_orl_dataset.fast_reward import StepMixedReward
+from f110_orl_dataset.fast_reward import MixedReward as MixedReward_fast
+from f110_orl_dataset.config_new import Config
+
+
+class GroundTruthRewardFast(object):
+    def __init__(self, dataset,  subsample_laser, config):
+       
+        self.env = gym.make('f110_with_dataset-v0',
+        # only terminals are available as of right now 
+        **dict(name='f110_with_dataset-v0',
+            config = dict(map="Infsaal", num_agents=1,
+            params=dict(vmin=0.5, vmax=2.0)),
+              render_mode="human")
+    )
+        
+        # config = Config('reward_config.json')
+        self.reward = MixedReward_fast(self.env, config)
+        self.model_input_normalizer = Normalize()
+        self.dataset= dataset
+        self.subsample_laser = subsample_laser
+    
+    def __call__(self, observation, action):
+        # the input observation and action are tensors
+
+        collision = np.zeros((observation.shape[0],observation.shape[1]), dtype=np.bool)
+        done = collision
+        #print(observation)
+        #print(action)
+        states = self.dataset.unnormalize_states(observation)
+        #print(states)
+        # we have to extract the previous action from the states
+        # states are: batch_dim, timesteps, observation_dim
+        previous_action = states[..., 7:9] 
+        assert(action.shape[0]==observation.shape[0])
+        #assert()
+
+        raw_action = previous_action + np.clip(action, -1, 1) * 0.05
+        print(raw_action.shape)
+        print(previous_action.shape)
+        print(action.shape)
+        #assert(raw_action.shape == previous_action.shape)
+        
+        #print(f"calcuated raw_action {raw_action}")
+        #print(np.array([observation_dict['poses_x'][0], observation_dict['poses_y'][0]]))
+        print("previours_action", previous_action[0])
+        print("current action:", np.clip(action[0], -1, 1) * 0.05 )
+        print("Raw_action infered:", raw_action[0])
+        reward, _ = self.reward(states, raw_action, 
+                                      collision, done)
+        #print("R:", reward)
+        return reward
+    
+    def reset(self, pose , velocity=1.5):
+        # arguments to this function are deprecated
+        self.reward.reset()
+
+
 
 class GroundTruthReward(object):
     def __init__(self, map, dataset,  subsample_laser, **reward_config):
@@ -426,16 +484,20 @@ class ModelBased2(object):
             # TODO! think about how to do better here
             if target_reward=="trajectories_td_prog.zarr":
                 print("[mb] Using progress reward")
-                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **progress_config)
+                config = Config('config/td_prog_config.json')
+                #self.reward_model = GroundTruthRewardFast(dataset,20, config)
             elif target_reward=="trajectories_raceline.zarr":
                 print("[mb] Using raceline reward")
-                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **raceline_config)
+                config = Config('config/raceline_config.json')
+                #self.reward_model = GroundTruthRewardFast(dataset,20, config)
             elif target_reward=="trajectories_min_act.zarr":
                 print("[mb]Using min action reward")
-                self.reward_model = GroundTruthReward("Infsaal",dataset,20, **min_action_config)
+                config = Config('config/min_act_config.json')
+                
             else:
                 raise NotImplementedError
-
+            print(config)
+            self.reward_model = GroundTruthRewardFast(dataset,20, config)
         self.writer=logger
         
         # self.dynamics_model.to(self.device)
@@ -586,10 +648,16 @@ class ModelBased2(object):
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
                 for i in range(horizon):
                     if get_target_action is None:
-                        action = actions[idx + i].unsqueeze(0)
+                        if i == 0: # TODO! this is missing in the dataset!
+                            action = np.zeros((state.shape[0],2))
+                        else:
+                            action = actions[idx + i - 1].unsqueeze(0)
                     else:
-                        action = get_target_action(state.to('cpu').numpy())
-                        action = tf_to_torch(action).to(self.device)
+                        if i == 0: #TODO! this is missing in the dataset!
+                            action = np.zeros((state.shape[0],2))
+                        else:
+                            action = get_target_action(state.to('cpu').numpy())
+                            action = tf_to_torch(action).to(self.device)
                     next_state = self.dynamics_model(state, action)
                     # can calculate action_raw by taking current action adding to previous_action observation
                     pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
@@ -676,7 +744,385 @@ class ModelBased2(object):
         sampled_indices = valid_indices[::step_size][:num_samples]
         
         return sampled_indices
-    
+
+    def plot_rollouts_fast(self, dataset,
+                      unnormalize_fn,
+                      batch_size = 256, 
+                      horizon=100, 
+                      num_samples=256, 
+                      discount=1.0, 
+                      get_target_action=None,
+                      use_dynamics=True):
+        with torch.no_grad():
+            states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
+            states = tf_to_torch(states).to(self.device)
+            actions = tf_to_torch(actions).to(self.device)
+            rewards = tf_to_torch(rewards).to(self.device)
+
+            sampled_initial_indices = self.sample_initial_states(inital_mask, 
+                                                                 min_distance=horizon, 
+                                                                 num_samples=num_samples)
+            
+            sampled_initial_indices = torch.tensor(sampled_initial_indices)
+
+            sampled_states = torch.stack([states[idx:idx + horizon] for idx in sampled_initial_indices])
+            sampled_actions = torch.stack([actions[idx:idx + horizon] for idx in sampled_initial_indices])
+            # Use a colormap to generate colors
+            num_samples = len(sampled_initial_indices)
+            colors = cm.viridis(np.linspace(0, 1, num_samples))
+
+            all_states, all_actions = self.fast_rollout(sampled_states, sampled_actions, 
+                                                        get_target_action=get_target_action,
+                                                        horizon=horizon,
+                                                        batch_size=batch_size,
+                                                        use_dynamics=use_dynamics)  
+            #print(all_states.shape)
+            #print(all_states[0])
+            #print(states.shape)
+            #print(states[sampled_initial_indices[0]:sampled_initial_indices[0]+horizon, 0:2])
+            all_states = all_states.cpu().numpy()
+            states = states.cpu().numpy()
+            plt.scatter(states[:, 0].reshape(-1)
+                        ,states[:, 1].reshape(-1), 
+            color='grey', s=5, label='All states', alpha=0.5)
+
+            for i,idx in enumerate(sampled_initial_indices):
+                trajectory = all_states[i,:, :2]
+                # print(trajectory.shape)
+                plt.scatter(trajectory[0, 0], trajectory[0, 1], color=colors[i], marker='x', s=60, label=f'Start {idx + 1}')
+                plt.plot(trajectory[:, 0], trajectory[:, 1], label=f"Rollout {idx + 1}", color=colors[i])
+                plt.plot(states[idx:idx+horizon, 0], states[idx:idx+horizon, 1],'--', label=f"Ground Truth {idx + 1}", color=colors[i])
+            plt.title("Rollouts using Given Actions (torch)")
+            # plt.legend()
+            plt.savefig(f"rollouts_mb_fast{use_dynamics}.png")
+            plt.clf()
+    def estimate_returns_fast():
+        pass
+
+    def evaluate_fast(self, dataset,
+                      unnormalize_fn,
+                      batch_size = 256, 
+                      horizon=100, 
+                      num_samples=256, 
+                      discount=1.0, 
+                      get_target_action=None):
+
+        with torch.no_grad():
+            states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
+            states = tf_to_torch(states).to(self.device)
+            actions = tf_to_torch(actions).to(self.device)
+            rewards = tf_to_torch(rewards).to(self.device)
+
+            sampled_initial_indices = self.sample_initial_states(inital_mask, 
+                                                                 min_distance=horizon, 
+                                                                 num_samples=num_samples)
+            
+            sampled_initial_indices = torch.tensor(sampled_initial_indices)
+            # calculate the ground truth of the rollouts
+            discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
+            gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
+            gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
+            mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
+
+            # create sampled_states
+            sampled_states = torch.stack([states[idx:idx + horizon] for idx in sampled_initial_indices])
+            sampled_actions = torch.stack([actions[idx:idx + horizon] for idx in sampled_initial_indices])
+
+
+            all_states, all_actions = self.fast_rollout(sampled_states, sampled_actions, 
+                                                        get_target_action=None,
+                                                        horizon=horizon,
+                                                        batch_size=batch_size,
+                                                        use_dynamics=True)
+            
+            print("-----")
+            print(all_states.shape)
+            print(all_actions.shape)
+            # self.reward_model.reset()
+            all_rewards = self.reward_model(all_states.cpu().numpy(), all_actions.cpu().numpy())
+            print(all_rewards.shape)
+            all_rewards = torch.tensor(all_rewards).to(self.device) * discount_factors
+            all_rewards = all_rewards.sum(dim=1)
+            all_rewards = all_rewards.cpu().numpy()
+            mean_model_rewards = np.mean(np.asarray(all_rewards))
+            print("model:", mean_model_rewards)
+            print("gt:",mean_gt_rewards)
+            print(dataset.raw_actions[0:5])
+
+    """
+    @input states: (batch, timestep, state_dim)
+    @input actions: (batch, timestep, action_dim)
+    performs parallel rollouts and returns
+    a rollout matrix of (batch, timestep, state_dim)
+    """
+    def fast_rollout(self, states, actions, 
+                     get_target_action=None, 
+                     horizon = 10,
+                     batch_size = 256,
+                     use_dynamics=True):
+        
+        assert (len(states.shape) == 3) # (batch, timestep, state_dim)
+        assert (len(actions.shape) == 3) # (batch, timestep, action_dim)
+        assert (states.shape[0] == actions.shape[0])
+        assert (states.shape[1] == actions.shape[1])
+        assert (states.shape[2] == 11)
+        assert (actions.shape[2] == 2)
+        with torch.no_grad():
+            states_initial = states[:,0,:] # get the first timesteps from the states
+            state_batches = torch.split(states_initial, batch_size) # only do rollouts from timestep 0
+
+            all_states = torch.zeros((0, horizon, states[0].shape[-1])).to(self.device)
+            all_actions = torch.zeros((0, horizon, 2)).to(self.device)
+            for num_batch, state_batch in enumerate(state_batches):
+                # (batch,11)
+                all_state_batches = torch.zeros((state_batch.shape[0], 0, state_batch[0].shape[-1])).to(self.device)
+                # now includes the first action that is always a (0,0)
+                all_actions_batches = torch.zeros((state_batch.shape[0], 0, 2)).to(self.device)
+                # add the first state to all_state_batches
+                # already handled by the for loop
+                # all_state_batches = torch.cat([all_state_batches, state_batch.unsqueeze(1)], dim=1)
+                #print(state_batch.shape)
+                for i in range(horizon):
+                    assert len(state_batch.shape) == 2
+                    assert state_batch.shape[0] <= batch_size
+                    assert state_batch.shape[1] == 11
+                    if get_target_action is None:
+                        if i == 0:
+                            action = np.zeros((state_batch.shape[0],2),dtype=np.float32)
+                            
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = actions[num_batch*batch_size:batch_size*(num_batch+1),i -1,:] # (batch,2)
+                            action = action.float()
+                        #print(action.shape)
+                        assert(action.shape[0] == state_batch.shape[0])
+                        assert(action.shape[1]==2)
+                    else:
+                        if i == 0: #TODO! this is missing in the dataset!
+                            action = np.zeros((state_batch.shape[0],2),dtype=np.float32)
+                            # action to torch
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = get_target_action(state_batch.to('cpu').numpy())
+                            assert(action.shape[0] == state_batch.shape[0])
+                            assert(action.shape[1]==2)
+                            action = tf_to_torch(action).to(self.device)
+                            #make dtype float32
+                            action = action.float()
+                    # add the action to all_batch_actions along dim=1
+                    all_actions_batches = torch.cat([all_actions_batches, action.unsqueeze(1)], dim=1)
+                    all_state_batches = torch.cat([all_state_batches, state_batch.unsqueeze(1)], dim=1)
+                    if use_dynamics:
+                        state_batch = self.dynamics_model(state_batch, action)
+                    elif horizon-1 != i:
+                        state_batch = states[:,i+1,:]
+                all_states = torch.cat([all_states, all_state_batches], dim=0)
+                all_actions = torch.cat([all_actions, all_actions_batches], dim=0)
+            return all_states, all_actions
+
+    def evaluate_rollouts_parallel(self, dataset,unnormalize_fn,
+                                   batch_size = 256, 
+                                   horizon=100, num_samples=256, discount=1.0, get_target_action=None):
+        """
+        Evaluate the rollouts using the learned dynamics model. And the fixed GT model.
+        Uses parallel fast reward.
+        """
+        with torch.no_grad():
+            states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
+            states = tf_to_torch(states).to(self.device)
+            actions = tf_to_torch(actions).to(self.device)
+            rewards = tf_to_torch(rewards).to(self.device)
+
+            # take indices from 0 to 16
+            #sampled_initial_indices = np.arange(0,16)
+            #sampled_inital_indices = [0]
+            sampled_initial_indices = self.sample_initial_states(inital_mask, 
+                                                                 min_distance=horizon, 
+                                                                 num_samples=num_samples)
+            # first calculate the ground truth rewards
+            sampled_initial_indices = torch.tensor(sampled_initial_indices)
+            discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
+            gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
+            #print(gt_rewards_segments.cpu().numpy())
+            #print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
+            #print("aaaaa")
+            # print(gt_rewards_segments.shape)
+            gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
+            mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
+            # for the batch size start indices:
+            idx_batches = torch.split(sampled_initial_indices, batch_size)
+            all_rewards = torch.zeros((sampled_initial_indices.shape[0],0)).to(self.device)
+            for idxs in idx_batches:
+                batch_states = states[idxs].unsqueeze(1) # (batch,1,11)
+                #print(batch_states.shape)
+                # self.reward_model.reset()
+                all_batch_states = torch.zeros((batch_states.shape[0], 0, batch_states.shape[-1])).to(self.device) # .copy()
+                # an empty action tensor with size (batch, 0, 2)
+                all_batch_actions = torch.zeros((batch_states.shape[0], 0, 2)).to(self.device)
+                batch_states = batch_states.squeeze(1) # (batch,11)
+                for i in range(horizon):
+                    
+                    if get_target_action is None:
+                        #print((idxs+i).shape)
+                        if i == 0:
+                            action = np.zeros((batch_states.shape[0],2),dtype=np.float32)
+                            
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = actions[idxs + i -1] # (batch,2)
+                            action = action.float()
+                        #print(action.shape)
+                        assert(action.shape[0] == batch_states.shape[0])
+                        assert(action.shape[1]==2)
+                    else:
+                        if i == 0: #TODO! this is missing in the dataset!
+                            action = np.zeros((batch_states.shape[0],2),dtype=np.float32)
+                            # action to torch
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = get_target_action(batch_states.to('cpu').numpy())
+                            assert(action.shape[0] == batch_states.shape[0])
+                            assert(action.shape[1]==2)
+                            action = tf_to_torch(action).to(self.device)
+                            #make dtype float32
+                            action = action.float()
+                    # add the action to all_batch_actions along dim=1
+                    all_batch_actions = torch.cat([all_batch_actions, action.unsqueeze(1)], dim=1)
+                    all_batch_states = torch.cat([all_batch_states, batch_states.unsqueeze(1)], dim=1)
+
+
+                    batch_states = self.dynamics_model(batch_states, action)
+
+                    
+                    
+                #print(all_batch_states.shape)
+                # now calculate the mixed reward for all_batch_states, not step reward
+                # send all batch_states to cpu numpy
+                all_batch = self.reward_model(all_batch_states.cpu().numpy(), all_batch_actions.cpu().numpy())
+                # now apply discount along dimension 1
+                #print(all_batch[0])
+                
+                #print(dataset.unnormalize_rewards(dataset.rewards[0:5]))
+                #print("--------")
+                #print("raw_actions:", raw_actions[0:5])
+                #print(discount_factors.shape)
+                #print(all_batch.shape)
+                all_batch = torch.tensor(all_batch).to(self.device) * discount_factors
+                all_batch = all_batch.sum(dim=1)
+                #print(all_batch.shape)
+                # append to all_rewards at dim 1
+                all_rewards = torch.cat([all_rewards, all_batch.unsqueeze(1)], dim=1)
+                #print(all_rewards.shape)
+            # calculate the mean of all rewards
+            all_rewards = all_rewards.cpu().numpy()
+            mean_model_rewards = np.mean(np.asarray(all_rewards))
+            print(mean_model_rewards)
+            print(mean_gt_rewards)
+
+
+    def test_parallel(self, dataset,unnormalize_fn,
+                                   batch_size = 8, 
+                                   horizon=100, num_samples=20, discount=1.0, get_target_action=None):
+        """
+        Evaluate the rollouts using the learned dynamics model. And the fixed GT model.
+        Uses parallel fast reward.
+        """
+        with torch.no_grad():
+            states, actions, rewards, inital_mask = dataset.states, dataset.actions, dataset.rewards, dataset.mask_inital
+            raw_actions = dataset.raw_actions
+            raw_actions = tf_to_torch(raw_actions).to(self.device)
+            states = tf_to_torch(states).to(self.device)
+            actions = tf_to_torch(actions).to(self.device)
+            rewards = tf_to_torch(rewards).to(self.device)
+
+            # take indices from 0 to 16
+            sampled_initial_indices = np.arange(0,16)
+            sampled_inital_indices = [0]
+            #self.sample_initial_states(inital_mask, min_distance=horizon, num_samples=num_samples)
+            # first calculate the ground truth rewards
+            sampled_initial_indices = torch.tensor(sampled_initial_indices)
+            discount_factors = torch.tensor([discount**i for i in range(horizon)]).to(self.device)
+            gt_rewards_segments = rewards[sampled_initial_indices[:, None] + torch.arange(horizon)].to(self.device)
+            #print(gt_rewards_segments.cpu().numpy())
+            #print(unnormalize_fn(gt_rewards_segments.cpu().numpy()))
+            #print("aaaaa")
+            # print(gt_rewards_segments.shape)
+            gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
+            mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
+            # for the batch size start indices:
+            idx_batches = torch.split(sampled_initial_indices, batch_size)
+            all_rewards = torch.zeros((sampled_initial_indices.shape[0],0))
+            for idxs in idx_batches:
+                batch_states = states[idxs].unsqueeze(1) # (batch,1,11)
+                #print(batch_states.shape)
+                # self.reward_model.reset()
+                all_batch_states = torch.zeros((batch_states.shape[0], 0, batch_states.shape[-1])).to(self.device) # .copy()
+                # an empty action tensor with size (batch, 0, 2)
+                all_batch_actions = torch.zeros((batch_states.shape[0], 0, 2)).to(self.device)
+                batch_states = batch_states.squeeze(1) # (batch,11)
+                for i in range(horizon):
+                    
+                    if get_target_action is None:
+                        #print((idxs+i).shape)
+                        if i == 0:
+                            action = np.zeros((batch_states.shape[0],2))
+                            
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = actions[idxs + i -1] # (batch,2)
+                        #print(action.shape)
+                        assert(action.shape[0] == batch_states.shape[0])
+                        assert(action.shape[1]==2)
+                    else:
+                        if i == 0: #TODO! this is missing in the dataset!
+                            action = np.zeros((batch_states.shape[0],2))
+                            # action to torch
+                            action = torch.tensor(action).to(self.device)
+                        else:
+                            action = get_target_action(batch_states.to('cpu').numpy())
+                            assert(action.shape[0] == batch_states.shape[0])
+                            assert(action.shape[1]==2)
+                            action = tf_to_torch(action).to(self.device)
+                    # add the action to all_batch_actions along dim=1
+                    all_batch_actions = torch.cat([all_batch_actions, action.unsqueeze(1)], dim=1)
+                    all_batch_states = torch.cat([all_batch_states, batch_states.unsqueeze(1)], dim=1)
+                    # batch_states = self.dynamics_model(batch_states, action)
+                    # take next states from the dataset
+                    batch_states = states[idxs + i + 1]
+                    # add the next state to all_batch_states along dim=1
+                    #if i != horizon-1:
+                    
+                    
+                #print(all_batch_states.shape)
+                # now calculate the mixed reward for all_batch_states, not step reward
+                # send all batch_states to cpu numpy
+                all_batch = self.reward_model(all_batch_states.cpu().numpy(), all_batch_actions.cpu().numpy())
+                # now apply discount along dimension 1
+                #print(all_batch[0])
+                
+                #print(dataset.unnormalize_rewards(dataset.rewards[0:5]))
+                #print("--------")
+                #print("raw_actions:", raw_actions[0:5])
+                #print(discount_factors.shape)
+                all_batch = all_batch * discount_factors
+                all_batch = all_batch.sum(dim=1)
+                #print(all_batch.shape)
+                # append to all_rewards at dim 1
+                all_rewards = np.cat([all_rewards, all_batch.unsqueeze(1)], dim=1)
+                #print(all_rewards.shape)
+            # calculate the mean of all rewards
+            mean_model_rewards = np.mean(np.asarray(all_rewards))
+            print(mean_model_rewards)
+            print(mean_gt_rewards)
+
+
+
     def evaluate_rollouts(self, dataset,unnormalize_fn,
                            horizon=100, num_samples=20, discount=1.0, get_target_action=None ):
         """
@@ -701,12 +1147,9 @@ class ModelBased2(object):
             # print(gt_rewards_segments.shape)
             gt_rewards = (gt_rewards_segments * discount_factors).sum(dim=1)
             mean_gt_rewards = unnormalize_fn(gt_rewards.mean().item())
-            # print(f"Mean GT rewards: {mean_gt_rewards}")
 
-            # next perform rollouts from the sampled_initial_indices with the dynamics model
-            # use the GT reward model to label the rewards of the rollouts and compute the mean
-            # print("Real first reward: ", rewards[sampled_initial_indices[0]])
-            
+            # now we perform parallel rollouts
+
             
             """
             model_rewards = []
@@ -732,12 +1175,14 @@ class ModelBased2(object):
             """
             
             model_rewards = []
+            print(len(sampled_initial_indices))
             for idx in sampled_initial_indices:
                 state = states[idx].unsqueeze(0)
                 rollout_rewards = []
                 # TODO! read velocity from state, quo vadis velocity?, 
                 # but should be unnecessary for used rewards aorn
                 self.reward_model.reset(state[0, :2].cpu().numpy(), velocity=1.5)
+                # print("******")
                 for i in range(horizon):
                     if get_target_action is None:
                         action = actions[idx + i].unsqueeze(0)
@@ -751,6 +1196,8 @@ class ModelBased2(object):
                     #print("raw action", action_raw)
                     next_state = self.dynamics_model(state, action)
                     # can calculate action_raw by taking current action adding to previous_action observation
+                    # squeeze in a dimension for the timestep (always one), in the middle
+                    
                     pred_reward = self.reward_model(state.cpu().numpy(), action.cpu().numpy())
                     rollout_rewards.append(pred_reward * (discount**i))
                     state = next_state
