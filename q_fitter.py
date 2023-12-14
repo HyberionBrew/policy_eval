@@ -39,7 +39,7 @@ class SimplifiedNetwork(nn.Module):
 class QFitter(nn.Module):
     """A critic network that estimates a dual Q-function."""
 
-    def __init__(self, state_dim, action_dim, critic_lr, weight_decay, tau, discount, use_time=False, timestep_constant=0.01, log_frequency=500, writer=None):
+    def __init__(self, state_dim, action_dim, critic_lr=3e-5, weight_decay=1e-5, tau=0.005, discount=0.99, use_time=False, timestep_constant=0.01, log_frequency=500, writer=None):
         """Creates networks.
         
         Args:
@@ -55,8 +55,8 @@ class QFitter(nn.Module):
             self.use_time = True
             self.timestep_constant = timestep_constant
 
-        self.critic = SimplifiedNetwork(state_dim,action_dim) #CriticNet(state_dim, action_dim)
-        self.critic_target = SimplifiedNetwork(state_dim,action_dim) #CriticNet(state_dim, action_dim)
+        self.critic = CriticNet(state_dim,action_dim) #CriticNet(state_dim, action_dim)
+        self.critic_target = CriticNet(state_dim,action_dim) #CriticNet(state_dim, action_dim)
 
         self.tau = tau
         self.soft_update(self.critic, self.critic_target, tau=1.0)

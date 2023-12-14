@@ -18,10 +18,11 @@ r"""Run off-policy evaluation training loop."""
 from absl import app
 from absl import flags
 from absl import logging
-from stable_baselines3 import PPO # this needs to be imported before tensorflow
+# from stable_baselines3 import PPO # this needs to be imported before tensorflow
 from policy_eval_torch.model_based_2 import ModelBased2
 from policy_eval_torch.q_fitter import QFitter
 from policy_eval_torch.doubly_robust import DR_estimator
+from f110_agents.agent import Agent
 
 import gc
 import json
@@ -111,7 +112,9 @@ flags.DEFINE_float('speed_multiplier', 1.0, 'Size of speed multiplier higher is 
 flags.DEFINE_integer('gap_blocker', 2, 'FTG gap block')
 flags.DEFINE_bool('ftg', False, 'Whether to use ftg agent')
 flags.DEFINE_integer('subsample_dataset', 1, 'Subsample the dataset')
-
+# parser.add_argument('--agent_config', type=str, default="agent_config.json", help="agent config file")
+flags.DEFINE_string('agent_config', "agent_config.json", help="agent config file"
+                    )
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
   if json_parameters:
     for key, value in json.loads(json_parameters).items():
@@ -247,7 +250,9 @@ def main(_):
   if not FLAGS.ftg:
     actor = F110Actor(FLAGS.target_policy, deterministic=False) #F110Stupid()
   else:
-    actor = StochasticContinousFTGAgent(gap_blocker = FLAGS.gap_blocker, speed_multiplier=FLAGS.speed_multiplier)
+    #actor = StochasticContinousFTGAgent(gap_blocker = FLAGS.gap_blocker, speed_multiplier=FLAGS.speed_multiplier)
+    agents = Agent()
+    actor = agents.load(FLAGS.agent_config)
   model_input_normalizer = Normalize()
 
   """
@@ -368,7 +373,8 @@ def main(_):
                     writer=writer)
     print("rewards", behavior_dataset.rewards)
     print("max_reward", behavior_dataset.rewards.max())
-    if False:
+    if FLAGS.dr: # ENABLE THIS IF YOU WANT TO USE DR
+      # IMPORTANT! change fqe_load path if you want to use DR
       # fqe_load = f"/home/fabian/msc/f110_dope/ws_ope/logdir_torch/0912_4_1/fqe/{FLAGS.path}/{FLAGS.clip_trajectory_max}/{target_policy}"
       fqe_load = f"/home/fabian/msc/f110_dope/ws_ope/logdir_torch/1212_min_max_sparse3_1/fqe/trajectories_1112.zarr/{FLAGS.clip_trajectory_max}/{target_policy}"
       print("Loading from ", fqe_load)

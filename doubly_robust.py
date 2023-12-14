@@ -1,5 +1,5 @@
 import numpy as np
-from policy_eval_torch.dataset import F110Dataset
+from policy_eval.dataset import F110Dataset
 import torch 
 
 class DR_estimator:
