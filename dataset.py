@@ -15,29 +15,17 @@ class F110Dataset(Dataset):
                d4rl_env,
                normalize_states = False,
                normalize_rewards = False,
-               path=None,
-               exclude_agents = [],
+               remove_agents = [],
                only_agents = [],
-               alternate_reward = False,
                state_mean=None,
                state_std = None,
                reward_mean = None,
-               reward_std = None,
-               include_timesteps_in_obs = False,
-               only_terminals=False,
-               clip_trajectory_length= None,
-               sample_from_trajectories= 0):
+               reward_std = None,):
         # Load the dataset
 
         d4rl_dataset = d4rl_env.get_dataset(
-            zarr_path=path, 
-            without_agents=exclude_agents, 
+            remove_agents=remove_agents, 
             only_agents=only_agents,
-            alternate_reward=alternate_reward,
-            include_timesteps_in_obs=include_timesteps_in_obs,
-            only_terminals=only_terminals,
-            clip_trajectory_length=clip_trajectory_length,
-            sample_from_trajectories=sample_from_trajectories,
         )
         # Assuming 'observations' and 'next_observations' are keys in the dataset
         #self.observations = self.data['observations']
@@ -46,14 +34,15 @@ class F110Dataset(Dataset):
             self.timestep_constant = d4rl_dataset['timesteps_constant']
         
         self.states = torch.from_numpy(d4rl_dataset['observations'].astype(np.float32))
+        self.model_names = np.array(d4rl_dataset['model_name'])
         self.scans = torch.from_numpy(d4rl_dataset['scans'].astype(np.float32))
         self.actions = torch.from_numpy(d4rl_dataset['actions'].astype(np.float32))
-        self.raw_actions = torch.from_numpy(d4rl_dataset['raw_actions'].astype(np.float32))
+        # self.raw_actions = torch.from_numpy(d4rl_dataset['raw_actions'].astype(np.float32))
         self.rewards = torch.from_numpy(d4rl_dataset['rewards'].astype(np.float32))
         self.masks = torch.from_numpy(1.0 - d4rl_dataset['terminals'].astype(np.float32))
         self.log_probs = torch.from_numpy(d4rl_dataset['log_probs'].astype(np.float32))
-        self.timesteps = torch.from_numpy(d4rl_dataset['timesteps'].astype(np.float32))
-        
+        # self.timesteps = torch.from_numpy(d4rl_dataset['timesteps'].astype(np.float32))
+        self.obs_keys = d4rl_dataset["infos"]["obs_keys"]
         # now we need to do next states and next scans
         # first check where timeout and where terminal
         finished = np.logical_or(d4rl_dataset['terminals'], d4rl_dataset['timeouts'])
@@ -70,6 +59,7 @@ class F110Dataset(Dataset):
         self.rewards_next = torch.zeros_like(self.rewards)
         # zeros like (len(finished_indices), obs_shape)
         self.initial_states = torch.zeros((len(finished_indices), self.states.shape[-1]))
+        self.initial_scans = torch.zeros((len(finished_indices), self.scans.shape[-1]))
         # unused inital_weights
         self.initial_weights = torch.ones(len(self.initial_states))
         for i, stop in enumerate(finished_indices):
@@ -81,6 +71,7 @@ class F110Dataset(Dataset):
             self.scans_next[start:stop+1] = next_scans
             self.rewards_next[start:stop+1] = next_rewards
             self.initial_states[i] = self.states[start]
+            self.initial_scans[i] = self.scans[start]
             start = stop + 1
         print("initial states", self.initial_states.shape)
         # now perform intelligent normalization from the dataset
@@ -94,7 +85,10 @@ class F110Dataset(Dataset):
             self.states = self.normalize_states(self.states)
             self.initial_states = self.normalize_states(self.initial_states)
             self.states_next = self.normalize_states(self.states_next)
-        
+        else:
+            self.state_mean = torch.zeros_like(self.states[0])
+            self.state_std = torch.ones_like(self.states[0])
+
         if normalize_rewards == True:
             # do this here
             if reward_mean is None:
@@ -112,34 +106,39 @@ class F110Dataset(Dataset):
             self.reward_mean = 0.0
             self.reward_std = 1.0
 
-    def normalize_states(self, states):
-        # only normalize columns [0,1,4,5,6,7,8]
-        states_return = states.clone()
-        # if only 1d add a fake first dim
-        if len(states.shape) == 1:
-            states_return = np.expand_dims(states_return, axis=0)
-        for i in range(states_return.shape[-1]): # #[0,1,4,5,6,7,8]:#
-            states_return[...,i] = (states_return[...,i] - self.state_mean[i]) / max(self.state_std[i],1e-8)
-        if len(states.shape) == 1:
-            states_return = states_return[0]
-        return states_return
-    
     def normalize_rewards(self, rewards):
         return (rewards - self.reward_mean) / max(self.reward_std, 1e-8)
     
-    def unnormalize_states(self, states, eps=1e-8):
-        states_return = states.clone()
-        # 2,3 are theta already between -1 and 1
-        # 9,10 are progress already between -1 and 1
-        # if only 1d add a fake first dim
-        if len(states.shape) == 1:
-            states_return = torch.expand_dims(states_return, axis=0)
+    def normalize_states(self, states, keys=None):
+        if keys is None:
+            keys = self.obs_keys
+        indices = [self.obs_keys.index(key) for key in keys]
 
-        for i in range(states_return.shape[-1]): # [0,1,4,5,6,7,8]: #
-            states_return[...,i] = states_return[...,i] * max(self.state_std[i],eps) + self.state_mean[i]
-        # remove the fake dim
+        states_return = states.clone()
         if len(states.shape) == 1:
-            states_return = states_return[0]
+            states_return = states_return.unsqueeze(0)
+
+        for idx, key_idx in enumerate(indices):
+            states_return[..., idx] = (states_return[..., idx] - self.state_mean[key_idx]) / max(self.state_std[key_idx], 1e-8)
+
+        if len(states.shape) == 1:
+            states_return = states_return.squeeze(0)
+        return states_return
+
+    def unnormalize_states(self, states, keys=None, eps=1e-8):
+        if keys is None:
+            keys = self.obs_keys
+        indices = [self.obs_keys.index(key) for key in keys]
+
+        states_return = states.clone()
+        if len(states.shape) == 1:
+            states_return = states_return.unsqueeze(0)
+
+        for idx, key_idx in enumerate(indices):
+            states_return[..., idx] = states_return[..., idx] * max(self.state_std[key_idx], eps) + self.state_mean[key_idx]
+
+        if len(states.shape) == 1:
+            states_return = states_return.squeeze(0)
         return states_return
     
     def unnormalize_rewards(self, rewards):
@@ -159,9 +158,9 @@ class F110Dataset(Dataset):
         reward = self.rewards[idx]
         mask = self.masks[idx]
         log_prob = self.log_probs[idx]
-        timestep = self.timesteps[idx]
+        #timestep = self.timesteps[idx]
         # Include other components like actions, rewards, etc. if needed
-        return current_state, scan, action, next_state, next_scan, reward, mask, 1.0, log_prob, timestep 
+        return current_state, scan, action, next_state, next_scan, reward, mask, 1.0, log_prob 
 
 if __name__ == "__main__":
     import f110_gym

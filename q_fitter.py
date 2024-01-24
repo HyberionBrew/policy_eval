@@ -25,7 +25,40 @@ class CriticNet(nn.Module):
         x = F.relu(self.fc2(x))
         return torch.squeeze(self.fc3(x), -1)
         #return torch.squeeze(self.fc1(x), -1)
-  
+    
+class CriticNetOld(nn.Module):
+    """A critic network that estimates a dual Q-function."""
+    
+    def __init__(self, state_dim, action_dim):
+        """Creates networks.
+        
+        Args:
+          state_dim: State size.
+          action_dim: Action size.
+        """
+        super(CriticNet, self).__init__()
+        
+        self.fc1 = nn.Linear(state_dim + action_dim, 256)
+        self.bn1 = nn.BatchNorm1d(256)  # BatchNorm for the first layer
+
+        self.fc2 = nn.Linear(256, 256)
+        self.bn2 = nn.BatchNorm1d(256)  # BatchNorm for the second layer
+
+        self.fc3 = nn.Linear(256, 1)
+
+    def forward(self, states, actions):
+        x = torch.cat([states, actions], dim=-1)
+        
+        x = self.fc1(x)
+        x = self.bn1(x)  # Apply BatchNorm after the first linear layer
+        x = F.relu(x)
+
+        x = self.fc2(x)
+        x = self.bn2(x)  # Apply BatchNorm after the second linear layer
+        x = F.relu(x)
+
+        return torch.squeeze(self.fc3(x), -1)
+    
 class SimplifiedNetwork(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(SimplifiedNetwork, self).__init__()
@@ -50,6 +83,7 @@ class QFitter(nn.Module):
           tau: Soft update discount.
         """
         super(QFitter, self).__init__()
+        self.use_time = False
         if use_time:
             state_dim += 1
             self.use_time = True
@@ -113,6 +147,19 @@ class QFitter(nn.Module):
         print(next_actions.shape)
         print(next_actions[0])
         """
+        # if cuda is available send all there and if model is there
+        """
+        if torch.cuda.is_available():
+            states = states.cuda()
+            actions = actions.cuda()
+            next_states = next_states.cuda()
+            next_actions = next_actions.cuda()
+            rewards = rewards.cuda()
+            masks = masks.cuda()
+            weights = weights.cuda()
+            min_reward = min_reward.cuda()
+            max_reward = max_reward.cuda()
+        """
         #exit()
         with torch.no_grad():
             next_q = self.critic_target(next_states, next_actions) / (1 - discount)
@@ -135,6 +182,7 @@ class QFitter(nn.Module):
         # Zero gradients before backward pass
         
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0) 
         self.optimizer.step()
 
         self.soft_update(self.critic, self.critic_target, self.tau)
@@ -174,19 +222,26 @@ class QFitter(nn.Module):
         return weighted_mean, weighted_stddev
     """
 
-    def estimate_returns(self, initial_states, initial_weights, get_action, action_timesteps, action=None, timesteps=None, reduction=True):
+    def estimate_returns(self, initial_states, initial_weights, get_action, action_timesteps,scans=None, action=None, timesteps=None, reduction=True):
         """Estimate returns with fitted q learning."""
         with torch.no_grad():
             weighted_stddev = 0.0
             if action is not None:
                 initial_actions = action
             else:
-                initial_actions = get_action(initial_states,action_timesteps)
+                initial_actions = get_action(initial_states,scans = scans,action_timesteps=action_timesteps)
+            # send to cuda
+            #initial_states = initial_states.cuda()
+            #initial_actions = initial_actions.cuda()
+
             if timesteps is not None:
+                #timesteps = timesteps.cuda()
                 preds = self(initial_states, initial_actions, timesteps=timesteps)
             else:
 
                 preds = self(initial_states, initial_actions)
+            # back to cpu
+            preds = preds.cpu()
             if reduction==False:
                 weighted_mean = preds
             else:

@@ -19,9 +19,9 @@ from absl import app
 from absl import flags
 from absl import logging
 # from stable_baselines3 import PPO # this needs to be imported before tensorflow
-from policy_eval_torch.model_based_2 import ModelBased2
-from policy_eval_torch.q_fitter import QFitter
-from policy_eval_torch.doubly_robust import DR_estimator
+from policy_eval.model_based_2 import ModelBased2
+from policy_eval.q_fitter import QFitter
+from policy_eval.doubly_robust import DR_estimator
 from f110_agents.agent import Agent
 
 import gc
@@ -41,13 +41,13 @@ import numpy as np
 # from tf_agents.environments import gym_wrapper
 # from tf_agents.environments import suite_mujoco
 import tqdm
-from ftg_agents.agents_numpy import StochasticContinousFTGAgent
+#from ftg_agents.agents_numpy import StochasticContinousFTGAgent
 
 from tensorboardX import SummaryWriter
 # from ftg_agents.agents import *
 
 from f110_orl_dataset.normalize_dataset import Normalize
-from f110_orl_dataset.dataset_agents import F110Actor,F110Stupid
+# from f110_orl_dataset.dataset_agents import F110Actor,F110Stupid
 
 # import torch dataloader
 from torch.utils.data import DataLoader
@@ -56,10 +56,10 @@ import os
 import sys
 import torch
 
-from policy_eval_torch.dataset import F110Dataset
-from policy_eval_torch.q_model import FQEMB
-from policy_eval_torch.model_sim import SimBased
-from ftg_agents.agents_torch_wrapper import StochasticContinousFTGTorchWrapper
+from policy_eval.dataset import F110Dataset
+from policy_eval.q_model import FQEMB
+# from policy_eval.model_sim import SimBased
+# from ftg_agents.agents_torch_wrapper import StochasticContinousFTGTorchWrapper
 
 
 EPS = np.finfo(np.float32).eps
@@ -158,9 +158,9 @@ def create_save_dir(experiment_directory, target_policy):
 
 def main(_):
   target_policy = FLAGS.target_policy
-  if FLAGS.ftg:
-    target_policy = f"StochasticContinousFTGAgent_{FLAGS.speed_multiplier}_{FLAGS.gap_blocker}_0.2_0.3_2.0"
-  save_path = create_save_dir(f"1312_small_FQE_{FLAGS.subsample_dataset}", target_policy)
+  #if FLAGS.ftg:
+  #  target_policy = f"StochasticContinousFTGAgent_{FLAGS.speed_multiplier}_{FLAGS.gap_blocker}_0.2_0.3_2.0"
+  save_path = create_save_dir(f"4_1_FQE_{FLAGS.subsample_dataset}", target_policy)
   
 
   np.random.seed(FLAGS.seed)
@@ -196,7 +196,7 @@ def main(_):
       normalize_states=FLAGS.normalize_states,
       normalize_rewards=False,#FLAGS.normalize_rewards,
       path = f"/home/fabian/msc/f110_dope/ws_ope/f1tenth_orl_dataset/data/{FLAGS.path}", #trajectories.zarr",
-      exclude_agents = ['StochasticContinousFTGAgent_0.5_2_0.2_0.3_2.0','StochasticContinousFTGAgent_0.5_5_0.2_0.3_2.0','StochasticContinousFTGAgent_5.0_2_0.2_0.3_2.0','StochasticContinousFTGAgent_5.0_5_0.2_0.3_2.0'],#,'StochasticContinousFTGAgent_3.0_5_0.2_0.3_2.0'], #'progress_weight', 'raceline_delta_weight', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
+      exclude_agents = [FLAGS.target_policy],#['StochasticContinousFTGAgent_0.5_2_0.2_0.3_2.0','StochasticContinousFTGAgent_0.5_5_0.2_0.3_2.0','StochasticContinousFTGAgent_5.0_2_0.2_0.3_2.0','StochasticContinousFTGAgent_5.0_5_0.2_0.3_2.0'],#,'StochasticContinousFTGAgent_3.0_5_0.2_0.3_2.0'], #'progress_weight', 'raceline_delta_weight', 'min_action_weight'],#['det'], #+ [FLAGS.target_policy] , #+ ["min_lida", "raceline"],
       alternate_reward=FLAGS.alternate_reward,
       include_timesteps_in_obs = True,
       only_terminals=True,
@@ -247,108 +247,112 @@ def main(_):
   max_reward = behavior_dataset.rewards.max()
   print(min_reward)
   print(max_reward)
-  if not FLAGS.ftg:
-    actor = F110Actor(FLAGS.target_policy, deterministic=False) #F110Stupid()
-  else:
+  #if not FLAGS.ftg:
+  #  actor = F110Actor(FLAGS.target_policy, deterministic=False) #F110Stupid()
+  #else:
     #actor = StochasticContinousFTGAgent(gap_blocker = FLAGS.gap_blocker, speed_multiplier=FLAGS.speed_multiplier)
-    agents = Agent()
-    actor = agents.load(FLAGS.agent_config)
+  #  agents = Agent()
+  #  actor = agents.load(FLAGS.agent_config)
+  
+  actor = Agent().load(f"/home/fabian/msc/f110_dope/ws_release/f1tenth_orl_dataset/f110_orl_dataset/data/agent_configs/{FLAGS.target_policy}.json") # have to tidy this up
   model_input_normalizer = Normalize()
 
   """
   @brief input shape is (batch_size, obs_dim), state needs to be normalized!!
   """
-  def get_target_actions(states, action_timesteps=None, scans= None, batch_size=5000):
-    num_batches = int(np.ceil(len(states) / batch_size))
-    actions_list = []
-    # batching, s.t. we dont run OOM
-    for i in range(num_batches):
-      start_idx = i * batch_size
-      end_idx = min((i + 1) * batch_size, len(states))
-      batch_states = states[start_idx:end_idx].clone()
+  def get_target_actions(states, scans= None, action_timesteps=None, batch_size=5000):
+      num_batches = int(np.ceil(len(states) / batch_size))
+      actions_list = []
+      # batching, s.t. we dont run OOM
+      for i in range(num_batches):
+          start_idx = i * batch_size
+          end_idx = min((i + 1) * batch_size, len(states))
+          batch_states = states[start_idx:end_idx].clone()
 
-      # unnormalize from the dope dataset normalization
-      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
-      del batch_states
-      batch_states_unnorm = batch_states_unnorm.cpu().numpy()
+          # unnormalize from the dope dataset normalization
+          batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states) # this needs batches
+          del batch_states
+          batch_states_unnorm = batch_states_unnorm.cpu().numpy()
 
-      # get scans
-      if scans is not None:
-        laser_scan = scans[start_idx:end_idx].cpu().numpy()
-      else:
-        laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
-        #print("Scan 1")
-        #print(laser_scan)
-        laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
-        #print("Scan 2")
-        #print(laser_scan)
-      # back to dict
-      model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
-      # normalize back to model input
-      model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
-     
-      # now also append the laser scan
-      model_input_dict['lidar_occupancy'] = laser_scan
-      #print("model input dict")
-      # print(model_input_dict)
-      batch_actions = actor(
-        model_input_dict,
-        std=FLAGS.target_policy_std)[1]
-      #print(batch_actions)
-      
-      actions_list.append(batch_actions)
-    # tf.concat(actions_list, axis=0)
-    # with torch
-    # convert to torch tensor
-    actions_list = [torch.from_numpy(action) for action in actions_list]
-    actions = torch.concat(actions_list, axis=0)
-    # print(actions)
-    return actions.float()
-
-  def get_target_logprobs(states,actions,action_timesteps=None,scans=None, batch_size=5000):
-    num_batches = int(np.ceil(len(states) / batch_size))
-    log_probs_list = []
-    for i in range(num_batches):
-      # print(i)
-      # Calculate start and end indices for the current batch
-      start_idx = i * batch_size
-      end_idx = min((i + 1) * batch_size, len(states))
-      # Extract the current batch of states
-      batch_states = states[start_idx:end_idx]
-      batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
-      
-      # Extract the current batch of actions
-      batch_actions = actions[start_idx:end_idx]
-
-      # get scans
-      if scans is not None:
-        laser_scan = scans[start_idx:end_idx].cpu().numpy()
-      else:
-        laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
-        laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
-
-      # back to dict
-      model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
-      # normalize back to model input
-      model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
-      # now also append the laser scan
-      model_input_dict['lidar_occupancy'] = laser_scan
-
-      # Compute log_probs for the current batch
-      batch_log_probs = actor(
+          # get scans
+          if scans is not None:
+              laser_scan = scans[start_idx:end_idx].cpu().numpy()
+          else:
+              laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+              #print("Scan 1")
+              #print(laser_scan)
+              laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
+          #print("Scan 2")
+          #print(laser_scan)
+          # back to dict
+          #print(batch_states_unnorm.shape)
+          model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
+          # normalize back to model input
+          # model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
+          # now also append the laser scan
+          # print(model_input_dict)
+          model_input_dict['lidar_occupancy'] = laser_scan
+          #print("model input dict")
+          #print("after unflattening")
+          #print(model_input_dict)
+          batch_actions = actor(
           model_input_dict,
-          actions=batch_actions,
-          std=FLAGS.target_policy_std)[2]
-      
-      # Sum along the last axis if the rank is greater than 1
-      # print("len logprobs", print(batch_log_probs.shape))
-      
-      # Collect the batch_log_probs
-      log_probs_list.append(batch_log_probs)
-    # Concatenate the collected log_probs from all batches
-    log_probs = [torch.from_numpy(log_prob) for log_prob in log_probs_list]
-    log_probs = torch.concat(log_probs, axis=0)
-    return log_probs.float()
+          std=None)[1]
+          #print(batch_actions)
+          
+          actions_list.append(batch_actions)
+      # tf.concat(actions_list, axis=0)
+      # with torch
+      # convert to torch tensor
+      actions_list = [torch.from_numpy(action) for action in actions_list]
+      actions = torch.concat(actions_list, axis=0)
+      # print(actions)
+      return actions.float()
+
+  def get_target_logprobs(states,actions,scans=None,action_timesteps=None, batch_size=5000):
+      num_batches = int(np.ceil(len(states) / batch_size))
+      log_probs_list = []
+      for i in range(num_batches):
+          # print(i)
+          # Calculate start and end indices for the current batch
+          start_idx = i * batch_size
+          end_idx = min((i + 1) * batch_size, len(states))
+          # Extract the current batch of states
+          batch_states = states[start_idx:end_idx]
+          batch_states_unnorm = behavior_dataset.unnormalize_states(batch_states)
+          
+          # Extract the current batch of actions
+          batch_actions = actions[start_idx:end_idx]
+
+          # get scans
+          if scans is not None:
+              laser_scan = scans[start_idx:end_idx].cpu().numpy()
+          else:
+              laser_scan = F110Env.get_laser_scan(batch_states_unnorm, subsample_laser) # TODO! rename f110env to dataset_env
+              laser_scan = model_input_normalizer.normalize_laser_scan(laser_scan)
+
+          # back to dict
+          model_input_dict = model_input_normalizer.unflatten_batch(batch_states_unnorm)
+          # normalize back to model input
+          # model_input_dict = model_input_normalizer.normalize_obs_batch(model_input_dict)
+          # now also append the laser scan
+          model_input_dict['lidar_occupancy'] = laser_scan
+
+          # Compute log_probs for the current batch
+          batch_log_probs = actor(
+              model_input_dict,
+              actions=batch_actions,
+              std=None)[2]
+          
+          # Sum along the last axis if the rank is greater than 1
+          # print("len logprobs", print(batch_log_probs.shape))
+          
+          # Collect the batch_log_probs
+          log_probs_list.append(batch_log_probs)
+      # Concatenate the collected log_probs from all batches
+      log_probs = [torch.from_numpy(log_prob) for log_prob in log_probs_list]
+      log_probs = torch.concat(log_probs, axis=0)
+      return log_probs.float()
 
   if FLAGS.algo == "mb":
     model = ModelBased2(behavior_dataset.states.shape[1],
